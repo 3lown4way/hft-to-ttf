@@ -20,7 +20,16 @@ LANG_TO_LABEL = {
     'user': 'USER',
 }
 KICE09_OVERRIDES = {'USER.HFT': {0x3C30: '\uF076'}}
-KICE09_ALIASES = {'SPSMJ.HFT': {0x341A: ['\uA854'], 0x341B: ['\uA855']}}
+# KICE09 document-specific aliases. HNC 0x343F is the filled black-diamond
+# outline in SPSMJ.HFT (normally U+25C6); the original KICE09 PDF ToUnicode
+# exposes that same list-marker glyph as U+A2EE. Keep U+25C6 and add U+A2EE.
+KICE09_ALIASES = {
+    'SPSMJ.HFT': {
+        0x341A: ['\uA854'],
+        0x341B: ['\uA855'],
+        0x343F: ['\uA2EE'],
+    }
+}
 
 # Human-readable names reconstructed from the v3.4 font_mapping.json.
 # The primary name is the original Hangul face.  A short qualifier is used only
@@ -109,6 +118,16 @@ def main() -> None:
             source_code_overrides=KICE09_OVERRIDES,
             source_code_aliases=KICE09_ALIASES,
         )
+
+        # Every SPSMJ-based combination must carry both the ordinary Unicode
+        # diamond and the KICE09 document-specific alias, plus the two previously
+        # audited SPSMJ aliases. This turns the U+A2EE binding into a CI invariant.
+        if any(p.name.upper() == 'SPSMJ.HFT' for _, p in sources):
+            required = (0x25C6, 0xA2EE, 0xA854, 0xA855)
+            missing = [f'U+{cp:04X}' for cp in required if cp not in log]
+            if missing:
+                raise RuntimeError('missing KICE09 SPSMJ cmap entries: ' + ', '.join(missing))
+
         manifest = {
             'combo': args.combo,
             'family': family,
