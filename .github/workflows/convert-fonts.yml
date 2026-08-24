@@ -3,8 +3,8 @@ name: Convert HFT fonts to TTF
 on:
   push:
     branches: [main]
-    paths:
-      - 'inputs/kice09-required48.zip'
+    paths-ignore:
+      - 'output_ttf/**'
   workflow_dispatch:
     inputs:
       commit_results:
