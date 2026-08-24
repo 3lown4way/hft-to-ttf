@@ -9,7 +9,14 @@ LANG_TO_LABEL = {
     'hangul':'HG', 'latin':'EN', 'hanja':'HJ', 'other':'OTHER', 'symbol':'SP', 'user':'USER'
 }
 KICE09_OVERRIDES = {'USER.HFT': {0x3C30: '\uF076'}}
-KICE09_ALIASES = {'SPSMJ.HFT': {0x341A: ['\uA854'], 0x341B: ['\uA855']}}
+# Document-specific aliases audited from the KICE09 source/PDF. HNC 0x343F is
+# the ordinary SPSMJ black-diamond (U+25C6) outline and is additionally exposed
+# as U+A2EE by the original KICE09 PDF text mapping.
+KICE09_ALIASES = {'SPSMJ.HFT': {
+    0x341A: ['\uA854'],
+    0x341B: ['\uA855'],
+    0x343F: ['\uA2EE'],
+}}
 
 
 def main():
@@ -54,9 +61,14 @@ def main():
                 n,log=build(sources,out,f'KICE09 Combo {combo:02d} HFT TEMP',style,badj,
                             source_code_overrides=KICE09_OVERRIDES,
                             source_code_aliases=KICE09_ALIASES)
+                if any(p.name.upper() == 'SPSMJ.HFT' for _, p in sources):
+                    required=(0x25C6,0xA2EE,0xA854,0xA855)
+                    missing=[f'U+{cp:04X}' for cp in required if cp not in log]
+                    if missing:
+                        raise RuntimeError('missing KICE09 SPSMJ cmap entries: '+', '.join(missing))
                 manifest.append({'combo':combo,'style':style,'cmap':n,'out':out.name,'skipped':skipped})
                 print(out, n)
         (a.outdir/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
-        print('NOTE: U+A2EE and Hanyang-PUA old Hangul are not yet bound in v3.4; see unit-char audit.')
+        print('NOTE: U+A2EE is bound to SPSMJ HNC 0x343F; Hanyang-PUA old Hangul remains deferred.')
 
 if __name__=='__main__': main()
