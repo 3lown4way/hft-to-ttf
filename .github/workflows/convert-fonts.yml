@@ -37,9 +37,23 @@ jobs:
         shell: pwsh
         run: python -m pip install --upgrade pip; python -m pip install -r requirements.txt
 
-      - name: Inventory source fonts
+      - name: Restore required 48 HFT files
         shell: pwsh
-        run: python scripts/inventory.py fonts
+        run: |
+          $zip = 'inputs/kice09-required48.zip'
+          if (-not (Test-Path $zip)) {
+            throw "Missing $zip. Upload kice09-required48.zip to the inputs/ folder."
+          }
+          if (Test-Path fonts) { Remove-Item fonts -Recurse -Force }
+          New-Item -ItemType Directory -Path fonts | Out-Null
+          Expand-Archive -Path $zip -DestinationPath fonts -Force
+          $count = (Get-ChildItem fonts -File -Filter *.HFT).Count
+          if ($count -ne 48) { throw "Expected 48 HFT files, found $count" }
+          Write-Host "Restored $count HFT files."
+
+      - name: Verify required-file SHA256 hashes
+        shell: pwsh
+        run: python scripts/verify_required48.py fonts manifests/kice09_required48_sha256.txt
 
       - name: Convert HFT to TTF with v3.4
         shell: pwsh
