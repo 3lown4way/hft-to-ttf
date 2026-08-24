@@ -1,6 +1,10 @@
 name: Convert HFT fonts to TTF
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'inputs/kice09-required48.zip'
   workflow_dispatch:
     inputs:
       commit_results:
@@ -74,7 +78,7 @@ jobs:
           compression-level: 0
 
       - name: Commit generated TTF files
-        if: ${{ inputs.commit_results }}
+        if: ${{ github.event_name == 'push' || inputs.commit_results }}
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
