@@ -1,0 +1,79 @@
+name: Convert HFT fonts to TTF
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_results:
+        description: 'Commit generated TTF files back to the repository'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: 'utf-8'
+
+jobs:
+  convert:
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: python -m pip install --upgrade pip; python -m pip install -r requirements.txt
+
+      - name: Restore source font folder
+        shell: pwsh
+        run: python scripts/extract_sources.py --archives source_archives --output fonts
+
+      - name: Inventory source fonts
+        shell: pwsh
+        run: python scripts/inventory.py fonts
+
+      - name: Convert HFT to TTF
+        shell: pwsh
+        run: python scripts/run_converter.py --input fonts --output output_ttf --converter converter
+
+      - name: Validate generated TTF files
+        shell: pwsh
+        run: python scripts/validate_ttf.py output_ttf
+
+      - name: Upload converted fonts artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: converted-ttf-${{ github.run_number }}
+          path: |
+            output_ttf/**/*.ttf
+            output_ttf/**/*.TTF
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Commit generated TTF files
+        if: ${{ inputs.commit_results }}
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add output_ttf
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "No generated font changes to commit."
+            exit 0
+          }
+          git commit -m "build: regenerate TTF fonts"
+          git push
