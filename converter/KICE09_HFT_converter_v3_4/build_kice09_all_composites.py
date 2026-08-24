@@ -4,18 +4,15 @@ import argparse, csv, json, tempfile, zipfile
 from pathlib import Path
 from build_composite import build
 from hft_core_v34 import read_meta
+from kice09_document_patches import patch_a2ee_marker, assert_a2ee_marker
 
 LANG_TO_LABEL = {
     'hangul':'HG', 'latin':'EN', 'hanja':'HJ', 'other':'OTHER', 'symbol':'SP', 'user':'USER'
 }
 KICE09_OVERRIDES = {'USER.HFT': {0x3C30: '\uF076'}}
-# Document-specific aliases audited from the KICE09 source/PDF. HNC 0x343F is
-# the ordinary SPSMJ black-diamond (U+25C6) outline and is additionally exposed
-# as U+A2EE by the original KICE09 PDF text mapping.
 KICE09_ALIASES = {'SPSMJ.HFT': {
     0x341A: ['\uA854'],
     0x341B: ['\uA855'],
-    0x343F: ['\uA2EE'],
 }}
 
 
@@ -24,7 +21,7 @@ def main():
     ap.add_argument('fonts_zip', type=Path)
     ap.add_argument('combinations_csv', type=Path, help='analysis_v34/KICE09_fontref_combinations_v34.csv')
     ap.add_argument('--outdir', type=Path, default=Path('KICE09_composites_local'))
-    ap.add_argument('--with-provisional-bold', action='store_true', help='Also build Bold variants using metric-only +em/20 correction; outline emboldening is NOT exact')
+    ap.add_argument('--with-provisional-bold', action='store_true', help='Diagnostic only: metric-only bold approximation; production HWPX should preserve charPr bold=1 on the Regular fontRef')
     a=ap.parse_args(); a.outdir.mkdir(parents=True,exist_ok=True)
 
     rows=list(csv.DictReader(a.combinations_csv.open(encoding='utf-8-sig')))
@@ -61,14 +58,18 @@ def main():
                 n,log=build(sources,out,f'KICE09 Combo {combo:02d} HFT TEMP',style,badj,
                             source_code_overrides=KICE09_OVERRIDES,
                             source_code_aliases=KICE09_ALIASES)
+                if combo == 6:
+                    patch_a2ee_marker(out, log)
+                    assert_a2ee_marker(out)
+                    n += 1
                 if any(p.name.upper() == 'SPSMJ.HFT' for _, p in sources):
-                    required=(0x25C6,0xA2EE,0xA854,0xA855)
+                    required=(0xA854,0xA855)
                     missing=[f'U+{cp:04X}' for cp in required if cp not in log]
                     if missing:
                         raise RuntimeError('missing KICE09 SPSMJ cmap entries: '+', '.join(missing))
                 manifest.append({'combo':combo,'style':style,'cmap':n,'out':out.name,'skipped':skipped})
                 print(out, n)
         (a.outdir/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
-        print('NOTE: U+A2EE is bound to SPSMJ HNC 0x343F; Hanyang-PUA old Hangul remains deferred.')
+        print('NOTE: U+A2EE uses the recovered Hancom U+F02EE small-diamond marker; Hanyang-PUA old Hangul remains deferred.')
 
 if __name__=='__main__': main()
