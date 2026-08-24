@@ -1,17 +1,7 @@
 # Converter core
 
-Place the previously generated **KICE09_HFT_converter_v3_3** source package here.
+This repository uses **KICE09_HFT_converter_v3_4**.
 
-The Actions wrapper recognizes these entrypoints automatically:
+Place either the expanded `KICE09_HFT_converter_v3_4/` directory or the original `KICE09_HFT_converter_v3_4.zip` package in this directory. `scripts/run_converter.py` detects either form.
 
-- `build_all_fonts.bat`
-- `build_needed_fonts.bat`
-- `build_47_fonts.bat`
-- `convert_all.py`
-- `hft_to_ttf.py`
-- `converter.py`
-- `main.py`
-
-If the recovered package uses another command, set `HFT_CONVERTER_COMMAND` in `.github/workflows/convert-fonts.yml`.
-
-Do not replace the v3.3 decoder with an older partial decoder: different HFT families can use different internal glyph streams.
+The v3.4 validated path builds the actual KICE09 script/fontRef combinations. It is not yet a universal converter for every one of the 387 HFT files; JP Unicode mapping and some non-KICE legacy layouts still require additional implementation.
