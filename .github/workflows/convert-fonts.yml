@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths-ignore:
       - 'output_ttf/**'
+      - 'README.md'
+      - 'converter/KICE09_HFT_converter_v3_4/analysis_v34/**'
   workflow_dispatch:
     inputs:
       commit_results:
