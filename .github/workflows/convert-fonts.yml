@@ -16,15 +16,92 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: hft-conversion
+  cancel-in-progress: true
+
 env:
   PYTHONUTF8: '1'
   PYTHONIOENCODING: 'utf-8'
 
 jobs:
-  convert:
+  verify:
     runs-on: windows-2025
-    timeout-minutes: 120
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
 
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Restore required 48 HFT files
+        shell: pwsh
+        run: |
+          $zip = 'inputs/kice09-required48.zip'
+          if (-not (Test-Path $zip)) { throw "Missing $zip" }
+          New-Item -ItemType Directory -Path fonts -Force | Out-Null
+          Expand-Archive -Path $zip -DestinationPath fonts -Force
+          $count = (Get-ChildItem fonts -File -Filter *.HFT).Count
+          if ($count -ne 48) { throw "Expected 48 HFT files, found $count" }
+          Write-Host "Restored $count HFT files."
+
+      - name: Verify required-file SHA256 hashes
+        shell: pwsh
+        run: python scripts/verify_required48.py fonts manifests/kice09_required48_sha256.txt
+
+  build:
+    needs: verify
+    runs-on: windows-2025
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 13
+      matrix:
+        combo: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: python -m pip install --upgrade pip; python -m pip install -r requirements.txt
+
+      - name: Build KICE09 combo ${{ matrix.combo }}
+        shell: pwsh
+        run: |
+          python converter/KICE09_HFT_converter_v3_4/build_one_combo_ci.py `
+            inputs/kice09-required48.zip `
+            converter/KICE09_HFT_converter_v3_4/analysis_v34/KICE09_fontref_combinations_v34.csv `
+            --combo ${{ matrix.combo }} `
+            --outdir combo_out
+
+      - name: Validate combo TTF
+        shell: pwsh
+        run: python scripts/validate_ttf.py combo_out
+
+      - name: Upload combo artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kice09-combo-${{ matrix.combo }}
+          path: combo_out/*.ttf
+          if-no-files-found: error
+          compression-level: 0
+
+  collect:
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -41,39 +118,25 @@ jobs:
         shell: pwsh
         run: python -m pip install --upgrade pip; python -m pip install -r requirements.txt
 
-      - name: Restore required 48 HFT files
+      - name: Download all combo artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: kice09-combo-*
+          path: output_ttf
+          merge-multiple: true
+
+      - name: Validate complete output set
         shell: pwsh
         run: |
-          $zip = 'inputs/kice09-required48.zip'
-          if (-not (Test-Path $zip)) {
-            throw "Missing $zip. Upload kice09-required48.zip to the inputs/ folder."
-          }
-          if (Test-Path fonts) { Remove-Item fonts -Recurse -Force }
-          New-Item -ItemType Directory -Path fonts | Out-Null
-          Expand-Archive -Path $zip -DestinationPath fonts -Force
-          $count = (Get-ChildItem fonts -File -Filter *.HFT).Count
-          if ($count -ne 48) { throw "Expected 48 HFT files, found $count" }
-          Write-Host "Restored $count HFT files."
+          $count = (Get-ChildItem output_ttf -File -Filter *.ttf).Count
+          if ($count -ne 13) { throw "Expected 13 TTF files, found $count" }
+          python scripts/validate_ttf.py output_ttf
 
-      - name: Verify required-file SHA256 hashes
-        shell: pwsh
-        run: python scripts/verify_required48.py fonts manifests/kice09_required48_sha256.txt
-
-      - name: Convert HFT to TTF with v3.4
-        shell: pwsh
-        run: python scripts/run_converter.py --input fonts --output output_ttf --converter converter
-
-      - name: Validate generated TTF files
-        shell: pwsh
-        run: python scripts/validate_ttf.py output_ttf
-
-      - name: Upload converted fonts artifact
+      - name: Upload complete TTF set
         uses: actions/upload-artifact@v7
         with:
           name: converted-ttf-${{ github.run_number }}
-          path: |
-            output_ttf/**/*.ttf
-            output_ttf/**/*.TTF
+          path: output_ttf/*.ttf
           if-no-files-found: error
           compression-level: 0
 
@@ -89,5 +152,5 @@ jobs:
             Write-Host "No generated font changes to commit."
             exit 0
           }
-          git commit -m "build: regenerate TTF fonts"
+          git commit -m "build: regenerate 13 KICE09 TTF composites"
           git push
