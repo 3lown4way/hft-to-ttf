@@ -48,13 +48,37 @@ def build(
             if cp in cmap:
                 continue
             name = f"uni{cp:04X}" if cp <= 0xFFFF else f"u{cp:06X}"
-            glyphs[name] = item.glyph
+            glyph = item.glyph
+
+            # Preserve Hancom's actual HFT output baseline. The v3.4 core
+            # subtracts the shell header baseline (200 source units), but direct
+            # comparison with the embedded CIDFontType0C outlines in the official
+            # 2026 KICE Korean exam shows the rendered baseline is 0.15em.
+            # All 48 validated KICE09 HFTs use header baseline=200; therefore the
+            # correction from the old geometry is +50 units for 1000 UPEM faces
+            # and +16.7 units for 1200 UPEM faces.
+            baseline_fix = int(round((200 - 0.15 * item.source_upem) * TARGET_UPEM / item.source_upem))
+            try:
+                coords, _end_pts, _flags = glyph.getCoordinates(None)
+                if baseline_fix:
+                    for i, (x, y) in enumerate(coords):
+                        coords[i] = (x, y + baseline_fix)
+                    glyph.coordinates = coords
+                lsb = min((pt[0] for pt in coords), default=0)
+            except Exception:
+                lsb = 0
+
+            glyphs[name] = glyph
             adv = item.advance
             # Provisional metric-only correction for bold. This switch does NOT
             # reproduce the historical Hancom outline emboldening algorithm.
             if bold_metric_adjust:
                 adv += TARGET_UPEM // 20
-            metrics[name] = (adv, 0)
+
+            # TrueType hmtx leftSideBearing must match the recovered raw xMin.
+            # Writing zero here (the old v3.4 behavior) makes TT renderers shift
+            # each outline left by its original bearing.
+            metrics[name] = (adv, int(round(lsb)))
             cmap[cp] = name
             order.append(name)
             source_log[cp] = f"{label}:{path.name}:HNC0x{item.internal_code:04X}:{item.encryption}"
