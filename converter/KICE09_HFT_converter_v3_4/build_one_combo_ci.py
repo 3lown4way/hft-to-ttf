@@ -10,6 +10,7 @@ from pathlib import Path
 
 from build_composite import build
 from hft_core_v34 import read_meta
+from kice09_document_patches import patch_a2ee_marker, assert_a2ee_marker
 
 LANG_TO_LABEL = {
     'hangul': 'HG',
@@ -20,19 +21,18 @@ LANG_TO_LABEL = {
     'user': 'USER',
 }
 KICE09_OVERRIDES = {'USER.HFT': {0x3C30: '\uF076'}}
-# KICE09 document-specific aliases. HNC 0x343F is the filled black-diamond
-# outline in SPSMJ.HFT (normally U+25C6); the original KICE09 PDF ToUnicode
-# exposes that same list-marker glyph as U+A2EE. Keep U+25C6 and add U+A2EE.
+# Resolved SPSMJ document aliases. U+A2EE is deliberately NOT here: the KICE09
+# list marker is the Hancom legacy U+F02EE small-diamond glyph and is patched
+# after composite construction by kice09_document_patches.py.
 KICE09_ALIASES = {
     'SPSMJ.HFT': {
         0x341A: ['\uA854'],
         0x341B: ['\uA855'],
-        0x343F: ['\uA2EE'],
     }
 }
 
 # Human-readable names reconstructed from the v3.4 font_mapping.json.
-# The primary name is the original Hangul face.  A short qualifier is used only
+# The primary name is the original Hangul face. A short qualifier is used only
 # when multiple KICE09 fontRef combinations share the same Hangul face but use
 # materially different Latin/Hanja/Japanese/symbol faces, so Windows can install
 # all generated Regular fonts without family/style collisions.
@@ -119,11 +119,17 @@ def main() -> None:
             source_code_aliases=KICE09_ALIASES,
         )
 
-        # Every SPSMJ-based combination must carry both the ordinary Unicode
-        # diamond and the KICE09 document-specific alias, plus the two previously
-        # audited SPSMJ aliases. This turns the U+A2EE binding into a CI invariant.
+        # U+A2EE occurs in charPr 9 / combo 6 only. It is a document-specific
+        # legacy marker, so patch it only into the combination that actually uses
+        # the source scalar rather than polluting every generated font.
+        if args.combo == 6:
+            patch_a2ee_marker(out, log)
+            assert_a2ee_marker(out)
+            cmap_count += 1
+
+        # Existing document aliases must remain available in SPSMJ combinations.
         if any(p.name.upper() == 'SPSMJ.HFT' for _, p in sources):
-            required = (0x25C6, 0xA2EE, 0xA854, 0xA855)
+            required = (0xA854, 0xA855)
             missing = [f'U+{cp:04X}' for cp in required if cp not in log]
             if missing:
                 raise RuntimeError('missing KICE09 SPSMJ cmap entries: ' + ', '.join(missing))
