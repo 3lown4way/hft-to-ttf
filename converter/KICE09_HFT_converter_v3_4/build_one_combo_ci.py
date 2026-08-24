@@ -22,6 +22,34 @@ LANG_TO_LABEL = {
 KICE09_OVERRIDES = {'USER.HFT': {0x3C30: '\uF076'}}
 KICE09_ALIASES = {'SPSMJ.HFT': {0x341A: ['\uA854'], 0x341B: ['\uA855']}}
 
+# Human-readable names reconstructed from the v3.4 font_mapping.json.
+# The primary name is the original Hangul face.  A short qualifier is used only
+# when multiple KICE09 fontRef combinations share the same Hangul face but use
+# materially different Latin/Hanja/Japanese/symbol faces, so Windows can install
+# all generated Regular fonts without family/style collisions.
+COMBO_NAMES = {
+    1: '한양중고딕',
+    2: '신명 디나루',
+    3: '신명 중고딕',
+    4: '신명 중명조 - 한양영문',
+    5: '신명 중명조',
+    6: '신명 중명조 - 한양문자',
+    7: '신명 태고딕',
+    8: '한양견명조',
+    9: '신명 견명조',
+    10: '#태고딕',
+    11: '신명 신그래픽',
+    12: '신명 궁서',
+    13: '신명 중고딕 - 혼합',
+}
+
+
+def filename_for_family(family: str) -> str:
+    # Keep the original Korean face name visible while avoiding spaces that are
+    # inconvenient in downstream scripts. '#' is retained because it is part of
+    # the original Hancom face name (#태고딕).
+    return family.replace(' - ', '-').replace(' ', '') + '.ttf'
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description='Build one KICE09 v3.4 fontRef combination for CI matrix execution')
@@ -37,6 +65,10 @@ def main() -> None:
         row = next(r for r in rows if int(r['font_combo_id']) == args.combo)
     except StopIteration:
         raise SystemExit(f'Unknown font_combo_id: {args.combo}')
+
+    family = COMBO_NAMES.get(args.combo)
+    if not family:
+        raise SystemExit(f'No original-font name mapping for combo {args.combo}')
 
     with zipfile.ZipFile(args.fonts_zip) as zf, tempfile.TemporaryDirectory() as td:
         lookup = {Path(n).name.upper(): n for n in zf.namelist() if not n.endswith('/')}
@@ -67,11 +99,11 @@ def main() -> None:
                 continue
             sources.append((label, p))
 
-        out = args.outdir / f'KICE09_combo_{args.combo:02d}_Regular.ttf'
+        out = args.outdir / filename_for_family(family)
         cmap_count, log = build(
             sources,
             out,
-            f'KICE09 Combo {args.combo:02d} HFT TEMP',
+            family,
             'Regular',
             False,
             source_code_overrides=KICE09_OVERRIDES,
@@ -79,9 +111,11 @@ def main() -> None:
         )
         manifest = {
             'combo': args.combo,
+            'family': family,
             'style': 'Regular',
             'cmap': cmap_count,
             'out': out.name,
+            'sources': {k: (row.get(k) or '').strip() for k in ('hangul', 'latin', 'hanja', 'japanese', 'other', 'symbol', 'user')},
             'skipped': skipped,
             'log': log,
         }
@@ -89,7 +123,7 @@ def main() -> None:
             json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
             encoding='utf-8',
         )
-        print(out, cmap_count)
+        print(f'{family} -> {out} / cmap={cmap_count}')
 
 
 if __name__ == '__main__':
