@@ -37,15 +37,11 @@ jobs:
         shell: pwsh
         run: python -m pip install --upgrade pip; python -m pip install -r requirements.txt
 
-      - name: Restore source font folder
-        shell: pwsh
-        run: python scripts/extract_sources.py --archives source_archives --output fonts
-
       - name: Inventory source fonts
         shell: pwsh
         run: python scripts/inventory.py fonts
 
-      - name: Convert HFT to TTF
+      - name: Convert HFT to TTF with v3.4
         shell: pwsh
         run: python scripts/run_converter.py --input fonts --output output_ttf --converter converter
 
