@@ -79,7 +79,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         with zipfile.ZipFile(zip_path) as zf:
-            for name in ("ENGMJ.HFT", "SPSMJ.HFT"):
+            for name in ("ENGMJ.HFT", "ENSMJ.HFT", "SPSMJ.HFT"):
                 zf.extract(name, td)
 
         # charPr 10 question-number Latin face: 한양견명조 / ENGMJ.HFT.
@@ -88,11 +88,25 @@ def main() -> None:
         qttf = ttf_metrics(find_family("한양견명조"), qchars)
         assert_equal("question-number ENGMJ.HFT", qsrc, qttf)
 
-        # Main Shinmyeong Myeongjo symbol face used by 【】, wave dash and quotes.
-        schars = "【】～‘’“”"
-        ssrc = source_metrics(td / "SPSMJ.HFT", schars)
-        sttf = ttf_metrics(find_family("신명 중명조 - 한양문자"), schars)
-        assert_equal("SPSMJ.HFT punctuation/symbols", ssrc, sttf)
+        # Main body Latin punctuation: comma must come from ENSMJ.HFT with its
+        # recovered narrow advance and original side bearing, not a CJK fallback.
+        comma = ","
+        csrc = source_metrics(td / "ENSMJ.HFT", comma)
+        cttf = ttf_metrics(find_family("신명 중명조 - 한양문자"), comma)
+        assert_equal("main-body comma ENSMJ.HFT", csrc, cttf)
+
+        # Main Shinmyeong Myeongjo symbol face. Keep quotation marks separate in
+        # the audit so a future symbol/fallback regression cannot hide among
+        # unrelated brackets or wave-dash checks.
+        quote_chars = "‘’“”"
+        qtsrc = source_metrics(td / "SPSMJ.HFT", quote_chars)
+        qtttf = ttf_metrics(find_family("신명 중명조 - 한양문자"), quote_chars)
+        assert_equal("smart quotes SPSMJ.HFT", qtsrc, qtttf)
+
+        symbol_chars = "【】～"
+        ssrc = source_metrics(td / "SPSMJ.HFT", symbol_chars)
+        sttf = ttf_metrics(find_family("신명 중명조 - 한양문자"), symbol_chars)
+        assert_equal("SPSMJ.HFT brackets/wave-dash", ssrc, sttf)
 
 
 if __name__ == "__main__":
