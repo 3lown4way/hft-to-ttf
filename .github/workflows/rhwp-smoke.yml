@@ -38,14 +38,12 @@ jobs:
           python - <<'PY'
           from fontTools.ttLib import TTFont
           from pathlib import Path
-          import shutil, re
+          import shutil
           src=Path('output_ttf'); dst=Path('runtime_fonts')
           for i,p in enumerate(sorted(src.glob('*.ttf')),1):
               out=dst/p.name
               shutil.copy2(p,out)
               f=TTFont(out)
-              # Keep family/full names exactly as generated; only make the PostScript
-              # name unique so multiple KICE composite faces can coexist in one fontdb.
               ps=f'KICE09Combo{i:02d}-Regular'
               for n in f['name'].names:
                   if n.nameID==6:
@@ -54,13 +52,15 @@ jobs:
               f.save(out)
           PY
 
-      - name: Build rhwp v0.8.4 with KICE09 charPr font bridge
+      - name: Build rhwp v0.8.4 with KICE09 font and decoration bridges
         shell: bash
         run: |
           set -euxo pipefail
           git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
           python - <<'PY'
           from pathlib import Path
+
+          # 1) KICE09 charPr -> composite TTF family bridge
           p=Path('rhwp-src/src/renderer/style_resolver.rs')
           s=p.read_text(encoding='utf-8')
           old='''fn resolve_char_styles(doc_info: &DocInfo, dpi: f64) -> Vec<ResolvedCharStyle> {\n    doc_info\n        .char_shapes\n        .iter()\n        .map(|cs| resolve_single_char_style(cs, doc_info, dpi))\n        .collect()\n}\n'''
@@ -68,6 +68,23 @@ jobs:
           if old not in s:
               raise SystemExit('target resolve_char_styles block not found')
           p.write_text(s.replace(old,new,1),encoding='utf-8')
+
+          # 2) SVG/PDF decoration width bridge.
+          # compute_char_positions() includes letter/Justify spacing after the final glyph.
+          # That spacing is needed to position following glyphs, but it must not extend
+          # underline/strike past the final painted glyph.
+          p=Path('rhwp-src/src/renderer/svg.rs')
+          s=p.read_text(encoding='utf-8')
+          marker='''        // 밑줄 처리\n        if !matches!(style.underline, UnderlineType::None) {\n            let text_width = *char_positions.last().unwrap_or(&0.0);\n'''
+          replacement='''        // KICE09 print fidelity: decoration ends at the final glyph, not at\n        // the trailing tracking/Justify advance carried by char_positions.\n        let decoration_text_width = || -> f64 {\n            let total = *char_positions.last().unwrap_or(&0.0);\n            if text.is_empty() || char_positions.len() < 2 {\n                return total.max(0.0);\n            }\n            let full_last_advance = char_positions[char_positions.len() - 1]\n                - char_positions[char_positions.len() - 2];\n            let mut tight_style = style.clone();\n            tight_style.letter_spacing = 0.0;\n            tight_style.extra_char_spacing = 0.0;\n            let last_char = text.chars().last().unwrap().to_string();\n            let tight_positions = compute_char_positions(&last_char, &tight_style);\n            let tight_last_advance = *tight_positions.last().unwrap_or(&full_last_advance);\n            (total - full_last_advance + tight_last_advance).max(0.0)\n        };\n\n        // 밑줄 처리\n        if !matches!(style.underline, UnderlineType::None) {\n            let text_width = decoration_text_width();\n'''
+          if marker not in s:
+              raise SystemExit('underline width marker not found')
+          s=s.replace(marker,replacement,1)
+          strike='''        // 취소선 처리\n        if style.strikethrough {\n            let text_width = *char_positions.last().unwrap_or(&0.0);\n'''
+          strike_new='''        // 취소선 처리\n        if style.strikethrough {\n            let text_width = decoration_text_width();\n'''
+          if strike not in s:
+              raise SystemExit('strike width marker not found')
+          p.write_text(s.replace(strike,strike_new,1),encoding='utf-8')
           PY
           cd rhwp-src
           cargo build --release --bin rhwp
