@@ -37,6 +37,47 @@ jobs:
           python -m pip install --quiet fonttools pymupdf
           python tools/audit_hft_source_truth.py | tee quote-type3-audit.txt
 
+      - name: Dump quote Type3 font internals
+        shell: bash
+        run: |
+          python - <<'PY' | tee -a quote-type3-audit.txt
+          import pymupdf as fitz
+          doc=fitz.open('original-2009-june-language.pdf')
+          seen=set()
+          print('\n=== DETAILED TYPE3 QUOTE FONT INTERNALS ===')
+          for pno in range(min(5, doc.page_count)):
+              page=doc[pno]
+              quote_fonts=set()
+              for sp in page.get_texttrace():
+                  if any(chr(c[0]) in '‘’“”' for c in sp.get('chars', [])):
+                      quote_fonts.add(str(sp.get('font','')))
+              for f in page.get_fonts(full=True):
+                  xref, ext, typ, basefont, resname, enc, *rest=f
+                  if typ != 'Type3' or not ({str(basefont),str(resname)} & quote_fonts) or xref in seen:
+                      continue
+                  seen.add(xref)
+                  print(f'PAGE {pno+1} QUOTE_FONT xref={xref} basefont={basefont} resname={resname}')
+                  for key in ('FirstChar','LastChar','Widths','Encoding','CharProcs','ToUnicode','FontMatrix','FontBBox'):
+                      kind,val=doc.xref_get_key(xref,key)
+                      print(f'  {key}: {kind} {val}')
+                      if kind == 'xref':
+                          rx=int(val.split()[0])
+                          try:
+                              obj=doc.xref_object(rx, compressed=False)
+                              print(f'  -- {key} xref {rx} object --')
+                              print(obj[:30000])
+                          except Exception as e:
+                              print('  object error',e)
+                          try:
+                              if doc.xref_is_stream(rx):
+                                  raw=doc.xref_stream(rx)
+                                  text=raw.decode('latin1','replace')
+                                  print(f'  -- {key} xref {rx} stream --')
+                                  print(text[:30000])
+                          except Exception as e:
+                              print('  stream error',e)
+          PY
+
       - uses: actions/upload-artifact@v7
         with:
           name: quote-type3-audit
