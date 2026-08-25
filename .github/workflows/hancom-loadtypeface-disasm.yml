@@ -1,0 +1,58 @@
+name: Hancom LoadTypefaceDes disassembly
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/hancom-loadtypeface-disasm.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/hancom-loadtypeface-disasm.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download viewer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -H 'Referer: https://www.hancom.com/' -A 'Mozilla/5.0' \
+            'https://cdn.hancom.com/pds/hnc/VIE/hancomoffice-hwpviewer-Ubuntu-amd64.deb' -o viewer.deb
+          mkdir deb && cd deb && ar x ../viewer.deb && tar -xf data.tar.* && cd ..
+      - name: Disassemble exact loader and correlate HFT header
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=deb/usr/bin/hwpviewer
+          OUT=hancom-loadtypeface-disasm.txt
+          : > "$OUT"
+          echo '=== SYMBOL ===' >> "$OUT"
+          readelf -Ws "$BIN" | grep -E 'LoadTypefaceDes|CloseFont\(' >> "$OUT" || true
+          echo '=== FULL 0x17A1CD0..0x17A2040 ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn --start-address=0x17a1cd0 --stop-address=0x17a2040 "$BIN" >> "$OUT"
+          echo >> "$OUT"
+          echo '=== KICE09 HEADER 0x180..0x230 ===' >> "$OUT"
+          python - <<'PY' >> "$OUT"
+          import zipfile,struct
+          from pathlib import Path
+          with zipfile.ZipFile('inputs/kice09-required48.zip') as z:
+              names={Path(n).name.upper():n for n in z.namelist() if not n.endswith('/')}
+              for font in ('SPSMJ.HFT','SPJGT.HFT','TETGRSP.HFT'):
+                  b=z.read(names[font])
+                  print('\n',font,'size',len(b))
+                  for off in range(0x180,0x230,2):
+                      print(f'{off:04X}: u16={struct.unpack_from("<H",b,off)[0]:5d} 0x{struct.unpack_from("<H",b,off)[0]:04X}')
+          PY
+          cat "$OUT"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hancom-loadtypeface-disasm
+          path: hancom-loadtypeface-disasm.txt
+          if-no-files-found: error
