@@ -1,0 +1,64 @@
+name: rhwp HWP smoke test
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/rhwp-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download original 2009 June HWP
+        shell: bash
+        run: |
+          set -euxo pipefail
+          URL='https://t1.daumcdn.net/cfile/tistory/262D61365269C48115'
+          curl -L --fail --retry 3 \
+            -A 'Mozilla/5.0' \
+            -e 'https://legendstudy.com/223' \
+            "$URL" -o input.hwp
+          ls -l input.hwp
+          sha256sum input.hwp
+          echo '59af2533f5a12fee6685f9c9f3b8a646a54997badaba3c062138c7d04f5e6205  input.hwp' | sha256sum -c -
+
+      - name: Download rhwp v0.8.4
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 \
+            'https://github.com/edwardkim/rhwp/releases/download/v0.8.4/rhwp-v0.8.4-linux-x86_64.tar.gz' \
+            -o rhwp.tar.gz
+          tar xzf rhwp.tar.gz
+          chmod +x rhwp/rhwp
+          ./rhwp/rhwp capabilities > rhwp-capabilities.json
+
+      - name: Render untouched HWP with output_ttf
+        shell: bash
+        env:
+          RHWP_FONT_PATH: ${{ github.workspace }}/output_ttf
+        run: |
+          set -euxo pipefail
+          mkdir -p out/svg
+          ./rhwp/rhwp info input.hwp > out/info.txt
+          ./rhwp/rhwp export-svg input.hwp -p 0 -o out/svg
+          ./rhwp/rhwp export-pdf input.hwp -p 0 -o out/original-page1.pdf
+          ls -l out out/svg
+
+      - name: Upload smoke-test artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rhwp-smoke-page1
+          path: |
+            out/**
+            rhwp-capabilities.json
+          if-no-files-found: error
+          compression-level: 0
