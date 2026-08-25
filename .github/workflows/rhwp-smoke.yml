@@ -6,7 +6,7 @@ on:
     paths:
       - '.github/workflows/rhwp-smoke.yml'
   pull_request:
-    branches: [main]
+    branches: [main, rhwp-ci-base]
     paths:
       - '.github/workflows/rhwp-smoke.yml'
 
