@@ -5,6 +5,10 @@ on:
     branches: [rhwp-smoke-20260825]
     paths:
       - '.github/workflows/quote-type3-audit.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/quote-type3-audit.yml'
 
 permissions:
   contents: read
