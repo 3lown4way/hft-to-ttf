@@ -11,6 +11,12 @@ separate bold outline.
 The runtime families below are composites reconstructed solely from the source
 HFT fontRefs.  0.16 SVG px corresponds to the legacy PDF's 1-unit text stroke
 under its ~0.1199 pt/user-unit page transform at rhwp's 96 dpi SVG scale.
+
+Direct Skia has a second legacy-font issue on Linux: Typeface::family_name()
+can lose Korean family names and return strings containing '?'.  The TTF name
+table itself is intact, so custom font lookup must also be keyed by the Unicode
+family names parsed directly from the TTF.  This is a generic font-resolution
+fix, not a codepoint-specific glyph workaround.
 """
 from pathlib import Path
 import sys
@@ -48,9 +54,17 @@ def main() -> None:
     new = '''                    let legacy_hft_bold = run.style.is_visually_bold()\n                        && is_legacy_hft_runtime_family(&run.style.font_family);\n                    if run.style.is_visually_bold() && !legacy_hft_bold {\n                        attrs.push_str(" font-weight=\\\"bold\\\"");\n                    } else if run.style.is_medium_weight() {\n                        attrs.push_str(" font-weight=\\\"500\\\"");\n                    }\n                    if legacy_hft_bold {\n                        attrs.push_str(&format!(\n                            " stroke=\\\"{}\\\" stroke-width=\\\"{:.2}\\\"",\n                            color, LEGACY_HFT_BOLD_STROKE_PX\n                        ));\n                    }\n'''
     replace_once(p, old, new, "legacy HFT rotated bold")
 
-    # Temporary DirectLayer diagnostics: establish whether --font-path faces
-    # are actually loaded by Skia and whether HFT family requests hit them.
+    # DirectLayer custom-font loading: on Linux Skia may decode a Korean
+    # Typeface::family_name() as question marks even though the TTF's Unicode
+    # name table is correct.  Keep Skia's own key, but additionally alias the
+    # same Typeface by all Unicode FAMILY records parsed from the TTF bytes.
+    # This keeps --font-path resolution generic and preserves the font's cmap,
+    # outlines, and hmtx untouched.
     p = root / "src/renderer/skia/renderer.rs"
+    old = '''                    if let Ok(data) = std::fs::read(&path) {\n                        let skia_data = skia_safe::Data::new_copy(&data);\n                        if let Some(typeface) = font_mgr.new_from_data(&skia_data, None) {\n                            let family = typeface.family_name();\n                            into.entry(family).or_insert(typeface);\n                        }\n                    }\n'''
+    new = '''                    if let Ok(data) = std::fs::read(&path) {\n                        let mut unicode_family_aliases = Vec::<String>::new();\n                        if let Ok(face) = ttf_parser::Face::parse(&data, 0) {\n                            for name in face.names() {\n                                if name.name_id == ttf_parser::name_id::FAMILY {\n                                    if let Some(value) = name.to_string() {\n                                        let value = value.trim();\n                                        if !value.is_empty()\n                                            && !unicode_family_aliases.iter().any(|v| v == value)\n                                        {\n                                            unicode_family_aliases.push(value.to_string());\n                                        }\n                                    }\n                                }\n                            }\n                        }\n                        let skia_data = skia_safe::Data::new_copy(&data);\n                        if let Some(typeface) = font_mgr.new_from_data(&skia_data, None) {\n                            let family = typeface.family_name();\n                            into.entry(family).or_insert_with(|| typeface.clone());\n                            for alias in unicode_family_aliases {\n                                into.entry(alias).or_insert_with(|| typeface.clone());\n                            }\n                        }\n                    }\n'''
+    replace_once(p, old, new, "direct Unicode family aliases")
+
     old = '''        Self::load_typefaces_from_dirs(&self.font_mgr, &custom_dirs, &mut self.custom_typefaces);\n'''
     new = '''        Self::load_typefaces_from_dirs(&self.font_mgr, &custom_dirs, &mut self.custom_typefaces);\n        let mut hft_debug_families: Vec<String> = self.custom_typefaces.keys().cloned().collect();\n        hft_debug_families.sort();\n        eprintln!("RHWP_DIRECT_CUSTOM_FAMILIES={:?}", hft_debug_families);\n'''
     replace_once(p, old, new, "direct custom font census")
@@ -60,7 +74,7 @@ def main() -> None:
     new = '''                let primary_typeface = typeface_chain.first().cloned();\n                if text.contains('‘') || text.contains('’') || text.contains('신') {\n                    let hft_debug_chain: Vec<String> =\n                        typeface_chain.iter().map(|tf| tf.family_name()).collect();\n                    let hft_debug_sample: String = text.chars().take(48).collect();\n                    eprintln!(\n                        "RHWP_DIRECT_TEXT family={:?} custom_exact={} chain={:?} text={:?}",\n                        style.font_family,\n                        self.custom_typefaces.contains_key(style.font_family.as_str()),\n                        hft_debug_chain,\n                        hft_debug_sample\n                    );\n                }\n'''
     replace_once(p, old, new, "direct requested font trace")
 
-    print("patched rhwp legacy HFT bold as Regular fill+stroke + direct font trace")
+    print("patched rhwp legacy HFT bold + Unicode TTF family aliases + direct font trace")
 
 
 if __name__ == "__main__":
