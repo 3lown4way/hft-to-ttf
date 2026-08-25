@@ -8,6 +8,7 @@ on:
       - 'tools/patch_rhwp_hft_native.py'
       - 'tools/patch_rhwp_hft_synthetic_bold.py'
       - 'tools/audit_hft_source_truth.py'
+      - 'tools/compare_pdf_punctuation_baselines.py'
       - 'converter/KICE09_HFT_converter_v3_4/**'
       - 'output_ttf/**'
   pull_request:
@@ -17,6 +18,7 @@ on:
       - 'tools/patch_rhwp_hft_native.py'
       - 'tools/patch_rhwp_hft_synthetic_bold.py'
       - 'tools/audit_hft_source_truth.py'
+      - 'tools/compare_pdf_punctuation_baselines.py'
       - 'converter/KICE09_HFT_converter_v3_4/**'
       - 'output_ttf/**'
 
@@ -111,6 +113,20 @@ jobs:
             "$RHWP" export-pdf input.hwp -p "$p" -o "out/page-$((p+1))-embedded.pdf"
             "$RHWP" dump-pages input.hwp -p "$p" > "out/dump-pages/page-$((p+1)).txt"
           done
+
+      - name: Compare comma and quotation-mark Y placement against oracle PDF
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --quiet pymupdf pillow numpy
+          python tools/compare_pdf_punctuation_baselines.py \
+            --oracle original-2009-june-language.pdf \
+            --generated-dir out \
+            --pages 5 \
+            --dpi 600 \
+            --out-dir out/baseline-audit \
+            | tee out/baseline-audit-console.txt
 
       - name: Collect non-blocking SVG diagnostics
         if: always()
