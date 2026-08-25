@@ -37,45 +37,127 @@ jobs:
           python -m pip install --quiet fonttools pymupdf
           python tools/audit_hft_source_truth.py | tee quote-type3-audit.txt
 
-      - name: Dump quote Type3 font internals
+      - name: Isolate quote Type3 widths and CharProcs
         shell: bash
         run: |
           python - <<'PY' | tee -a quote-type3-audit.txt
+          import re
           import pymupdf as fitz
-          doc=fitz.open('original-2009-june-language.pdf')
-          seen=set()
-          print('\n=== DETAILED TYPE3 QUOTE FONT INTERNALS ===')
-          for pno in range(min(5, doc.page_count)):
-              page=doc[pno]
-              quote_fonts=set()
-              for sp in page.get_texttrace():
-                  if any(chr(c[0]) in '‘’“”' for c in sp.get('chars', [])):
-                      quote_fonts.add(str(sp.get('font','')))
-              for f in page.get_fonts(full=True):
-                  xref, ext, typ, basefont, resname, enc, *rest=f
-                  if typ != 'Type3' or not ({str(basefont),str(resname)} & quote_fonts) or xref in seen:
-                      continue
-                  seen.add(xref)
-                  print(f'PAGE {pno+1} QUOTE_FONT xref={xref} basefont={basefont} resname={resname}')
-                  for key in ('FirstChar','LastChar','Widths','Encoding','CharProcs','ToUnicode','FontMatrix','FontBBox'):
-                      kind,val=doc.xref_get_key(xref,key)
-                      print(f'  {key}: {kind} {val}')
-                      if kind == 'xref':
-                          rx=int(val.split()[0])
-                          try:
-                              obj=doc.xref_object(rx, compressed=False)
-                              print(f'  -- {key} xref {rx} object --')
-                              print(obj[:30000])
-                          except Exception as e:
-                              print('  object error',e)
-                          try:
-                              if doc.xref_is_stream(rx):
-                                  raw=doc.xref_stream(rx)
-                                  text=raw.decode('latin1','replace')
-                                  print(f'  -- {key} xref {rx} stream --')
-                                  print(text[:30000])
-                          except Exception as e:
-                              print('  stream error',e)
+
+          doc = fitz.open('original-2009-june-language.pdf')
+          page = doc[0]
+          target_unicode = {'‘':0x2018, '’':0x2019, '“':0x201C, '”':0x201D}
+
+          quote_font_name = None
+          for span in page.get_texttrace():
+              chars = span.get('chars', [])
+              if any(chr(c[0]) in target_unicode for c in chars):
+                  quote_font_name = str(span.get('font', ''))
+                  break
+          if not quote_font_name:
+              raise SystemExit('quote font not found')
+
+          font = None
+          for f in page.get_fonts(full=True):
+              xref, ext, typ, basefont, resname, enc, *rest = f
+              if typ == 'Type3' and quote_font_name in {str(basefont), str(resname)}:
+                  font = (xref, basefont, resname)
+                  break
+          if font is None:
+              raise SystemExit(f'Type3 quote font {quote_font_name!r} not found')
+          xref, basefont, resname = font
+          print('\n=== TARGETED TYPE3 QUOTE CHARPROCS ===')
+          print('font', quote_font_name, 'xref', xref, 'basefont', basefont, 'resname', resname)
+
+          def ref_xref(key):
+              kind, val = doc.xref_get_key(xref, key)
+              if kind != 'xref':
+                  raise RuntimeError(f'{key} is {kind}: {val}')
+              return int(val.split()[0])
+
+          # Widths: one numeric array indexed by PDF character code because FirstChar=0.
+          widths_obj = doc.xref_object(ref_xref('Widths'), compressed=False)
+          widths = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', widths_obj)]
+
+          # Encoding Differences: integer resets current code; /name assigns and increments.
+          enc_obj = doc.xref_object(ref_xref('Encoding'), compressed=False)
+          m = re.search(r'/Differences\s*\[(.*?)\]', enc_obj, re.S)
+          if not m:
+              raise RuntimeError('Differences array not found')
+          tokens = re.findall(r'/[^\s\[\]]+|\d+', m.group(1))
+          code_to_name = {}
+          cur = None
+          for tok in tokens:
+              if tok.startswith('/'):
+                  if cur is None:
+                      raise RuntimeError('glyph name before code in Differences')
+                  code_to_name[cur] = tok[1:]
+                  cur += 1
+              else:
+                  cur = int(tok)
+
+          # CharProcs dictionary maps glyph names to stream xrefs.
+          cp_obj = doc.xref_object(ref_xref('CharProcs'), compressed=False)
+          name_to_xref = {name:int(rx) for name,rx in re.findall(r'/([^\s/<>\[\]()]+)\s+(\d+)\s+0\s+R', cp_obj)}
+
+          # ToUnicode bfchar / bfrange mappings. Targets here are all bfchar in this PDF.
+          tu_xref = ref_xref('ToUnicode')
+          tu = doc.xref_stream(tu_xref).decode('latin1', 'replace')
+          unicode_to_code = {}
+          for src, dst in re.findall(r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>', tu):
+              try:
+                  code = int(src, 16)
+                  cp = int(dst, 16)
+              except ValueError:
+                  continue
+              unicode_to_code.setdefault(cp, code)
+
+          # Minimal Type3 path parser for m/l/c/re operators, sufficient to report raw X extrema.
+          def path_x_extrema(stream_text):
+              toks = re.findall(r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)|[A-Za-z]+', stream_text)
+              nums=[]; xs=[]
+              arity={'m':2,'l':2,'c':6,'v':4,'y':4,'re':4}
+              for tok in toks:
+                  try:
+                      nums.append(float(tok)); continue
+                  except ValueError:
+                      pass
+                  if tok in arity and len(nums) >= arity[tok]:
+                      a=nums[-arity[tok]:]
+                      if tok in ('m','l'):
+                          xs.append(a[0])
+                      elif tok == 'c':
+                          xs.extend((a[0],a[2],a[4]))
+                      elif tok == 'v':
+                          xs.extend((a[0],a[2]))
+                      elif tok == 'y':
+                          xs.extend((a[0],a[2]))
+                      elif tok == 're':
+                          xs.extend((a[0],a[0]+a[2]))
+                  nums=[]
+              return (min(xs), max(xs)) if xs else (None,None)
+
+          for ch, cp in target_unicode.items():
+              code = unicode_to_code.get(cp)
+              if code is None:
+                  print(repr(ch), 'NOT USED IN FIRST-PAGE T5 ToUnicode')
+                  continue
+              name = code_to_name.get(code)
+              proc_xref = name_to_xref.get(name or '')
+              width = widths[code] if code < len(widths) else None
+              print(f'\n{ch!r}: unicode=U+{cp:04X} pdf_code=0x{code:02X} width={width} glyph=/{name} charproc_xref={proc_xref}')
+              if proc_xref is None:
+                  continue
+              raw = doc.xref_stream(proc_xref)
+              text = raw.decode('latin1', 'replace')
+              print('CHARPROC STREAM:')
+              print(text)
+              xmin,xmax = path_x_extrema(text)
+              print('parsed_path_control_x_extrema=', xmin, xmax)
+              # d0/d1 metrics line, if present.
+              md = re.search(r'([-+]?\d+(?:\.\d+)?)\s+([-+]?\d+(?:\.\d+)?)\s+(?:(?:([-+]?\d+(?:\.\d+)?)\s+){4})?d[01]', text)
+              if md:
+                  print('metric_operator_match=', md.group(0))
           PY
 
       - uses: actions/upload-artifact@v7
