@@ -43,184 +43,125 @@ jobs:
           python - <<'PY' | tee -a quote-type3-audit.txt
           import re
           import pymupdf as fitz
-
-          doc = fitz.open('original-2009-june-language.pdf')
-          page = doc[0]
-          target_unicode = {'‘':0x2018, '’':0x2019, '“':0x201C, '”':0x201D}
-
-          quote_font_name = None
-          for span in page.get_texttrace():
-              chars = span.get('chars', [])
-              if any(chr(c[0]) in target_unicode for c in chars):
-                  quote_font_name = str(span.get('font', ''))
-                  break
-          if not quote_font_name:
-              raise SystemExit('quote font not found')
-
-          font = None
+          doc = fitz.open('original-2009-june-language.pdf'); page=doc[0]
+          target_unicode={'‘':0x2018,'’':0x2019,'“':0x201C,'”':0x201D}
+          qfont=None
+          for sp in page.get_texttrace():
+              if any(chr(c[0]) in target_unicode for c in sp.get('chars',[])):
+                  qfont=str(sp.get('font','')); break
+          fx=None
           for f in page.get_fonts(full=True):
-              xref, ext, typ, basefont, resname, enc, *rest = f
-              if typ == 'Type3' and quote_font_name in {str(basefont), str(resname)}:
-                  font = (xref, basefont, resname)
-                  break
-          if font is None:
-              raise SystemExit(f'Type3 quote font {quote_font_name!r} not found')
-          xref, basefont, resname = font
-          print('\n=== TARGETED TYPE3 QUOTE CHARPROCS ===')
-          print('font', quote_font_name, 'xref', xref, 'basefont', basefont, 'resname', resname)
-
-          def ref_xref(key):
-              kind, val = doc.xref_get_key(xref, key)
-              if kind != 'xref':
-                  raise RuntimeError(f'{key} is {kind}: {val}')
+              if f[2]=='Type3' and qfont in {str(f[3]),str(f[4])}: fx=f[0]; break
+          if fx is None: raise SystemExit('quote font missing')
+          def ref(k):
+              kind,val=doc.xref_get_key(fx,k)
+              if kind!='xref': raise RuntimeError((k,kind,val))
               return int(val.split()[0])
-
-          widths_obj = doc.xref_object(ref_xref('Widths'), compressed=False)
-          widths = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', widths_obj)]
-          enc_obj = doc.xref_object(ref_xref('Encoding'), compressed=False)
-          m = re.search(r'/Differences\s*\[(.*?)\]', enc_obj, re.S)
-          if not m:
-              raise RuntimeError('Differences array not found')
-          tokens = re.findall(r'/[^\s\[\]]+|\d+', m.group(1))
-          code_to_name = {}; cur = None
-          for tok in tokens:
-              if tok.startswith('/'):
-                  if cur is None: raise RuntimeError('glyph name before code in Differences')
-                  code_to_name[cur] = tok[1:]; cur += 1
-              else:
-                  cur = int(tok)
-          cp_obj = doc.xref_object(ref_xref('CharProcs'), compressed=False)
-          name_to_xref = {name:int(rx) for name,rx in re.findall(r'/([^\s/<>\[\]()]+)\s+(\d+)\s+0\s+R', cp_obj)}
-          tu = doc.xref_stream(ref_xref('ToUnicode')).decode('latin1', 'replace')
-          unicode_to_code = {}
-          for src, dst in re.findall(r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>', tu):
-              try: code, cp = int(src,16), int(dst,16)
-              except ValueError: continue
-              unicode_to_code.setdefault(cp, code)
-
-          def path_x_extrema(stream_text):
-              toks = re.findall(r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)|[A-Za-z]+', stream_text)
-              nums=[]; xs=[]
-              arity={'m':2,'l':2,'c':6,'v':4,'y':4,'re':4}
-              for tok in toks:
-                  try: nums.append(float(tok)); continue
+          widths=[float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?',doc.xref_object(ref('Widths'),compressed=False))]
+          enc=doc.xref_object(ref('Encoding'),compressed=False)
+          m=re.search(r'/Differences\s*\[(.*?)\]',enc,re.S); toks=re.findall(r'/[^\s\[\]]+|\d+',m.group(1))
+          c2n={}; cur=None
+          for t in toks:
+              if t.startswith('/'): c2n[cur]=t[1:]; cur+=1
+              else: cur=int(t)
+          cpobj=doc.xref_object(ref('CharProcs'),compressed=False)
+          n2x={n:int(x) for n,x in re.findall(r'/([^\s/<>\[\]()]+)\s+(\d+)\s+0\s+R',cpobj)}
+          tu=doc.xref_stream(ref('ToUnicode')).decode('latin1','replace')
+          u2c={int(dst,16):int(src,16) for src,dst in re.findall(r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>',tu)}
+          def extrema(text):
+              toks=re.findall(r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)|[A-Za-z]+',text); nums=[]; xs=[]
+              ar={'m':2,'l':2,'c':6,'v':4,'y':4,'re':4}
+              for t in toks:
+                  try: nums.append(float(t)); continue
                   except ValueError: pass
-                  if tok in arity and len(nums) >= arity[tok]:
-                      a=nums[-arity[tok]:]
-                      if tok in ('m','l'): xs.append(a[0])
-                      elif tok == 'c': xs.extend((a[0],a[2],a[4]))
-                      elif tok in ('v','y'): xs.extend((a[0],a[2]))
-                      elif tok == 're': xs.extend((a[0],a[0]+a[2]))
+                  if t in ar and len(nums)>=ar[t]:
+                      a=nums[-ar[t]:]
+                      if t in ('m','l'): xs.append(a[0])
+                      elif t=='c': xs += [a[0],a[2],a[4]]
+                      elif t in ('v','y'): xs += [a[0],a[2]]
+                      else: xs += [a[0],a[0]+a[2]]
                   nums=[]
-              return (min(xs), max(xs)) if xs else (None,None)
-
-          for ch, cp in target_unicode.items():
-              code = unicode_to_code.get(cp)
-              if code is None:
-                  print(repr(ch), 'NOT USED IN FIRST-PAGE T5 ToUnicode'); continue
-              name = code_to_name.get(code); proc_xref = name_to_xref.get(name or '')
-              width = widths[code] if code < len(widths) else None
-              print(f'\n{ch!r}: unicode=U+{cp:04X} pdf_code=0x{code:02X} width={width} glyph=/{name} charproc_xref={proc_xref}')
-              if proc_xref is None: continue
-              text = doc.xref_stream(proc_xref).decode('latin1', 'replace')
-              print('CHARPROC STREAM:'); print(text)
-              xmin,xmax = path_x_extrema(text)
-              print('parsed_path_control_x_extrema=', xmin, xmax)
-              md = re.search(r'([-+]?\d+(?:\.\d+)?)\s+([-+]?\d+(?:\.\d+)?)\s+(?:(?:([-+]?\d+(?:\.\d+)?)\s+){4})?d[01]', text)
-              if md: print('metric_operator_match=', md.group(0))
+              return min(xs),max(xs)
+          print('\n=== TARGETED TYPE3 QUOTE CHARPROCS ===')
+          for ch,ucp in target_unicode.items():
+              code=u2c.get(ucp)
+              if code is None: continue
+              name=c2n.get(code); px=n2x.get(name or '')
+              if px is None: continue
+              text=doc.xref_stream(px).decode('latin1','replace'); x0,x1=extrema(text)
+              print(repr(ch),'pdf_code',hex(code),'width',widths[code],'glyph',name,'charproc_xref',px,'x',x0,x1)
+              print(text)
           PY
 
       - name: Correlate all used SPSMJ symbols with Type3 metrics
         shell: bash
         run: |
           python - <<'PY' | tee -a quote-type3-audit.txt
-          import re, sys, tempfile, zipfile
+          import re,sys,tempfile,zipfile
           from pathlib import Path
           import pymupdf as fitz
           from fontTools.pens.boundsPen import BoundsPen
-
-          ROOT=Path('.')
-          sys.path.insert(0, str(ROOT/'converter'/'KICE09_HFT_converter_v3_4'))
-          from hft_core_v34 import iter_raw_records, read_meta, _char_for_record, _draw_ops
-
+          ROOT=Path('.'); sys.path.insert(0,str(ROOT/'converter'/'KICE09_HFT_converter_v3_4'))
+          from hft_core_v34 import iter_raw_records,read_meta,_char_for_record,_draw_ops
           with tempfile.TemporaryDirectory() as td:
               td=Path(td)
-              with zipfile.ZipFile(ROOT/'inputs'/'kice09-required48.zip') as z:
-                  z.extract('SPSMJ.HFT',td)
-              sp=td/'SPSMJ.HFT'; meta=read_meta(sp)
-              source={}
+              with zipfile.ZipFile(ROOT/'inputs'/'kice09-required48.zip') as z: z.extract('SPSMJ.HFT',td)
+              sp=td/'SPSMJ.HFT'; meta=read_meta(sp); source={}
               for idx,code,adv,ops,enc in iter_raw_records(sp):
                   ch=_char_for_record(meta,idx,code)
                   if not ch: continue
                   pen=BoundsPen(None); _draw_ops(ops,pen,0.0)
                   if pen.bounds:
-                      x0,y0,x1,y1=pen.bounds
-                      source[ch]=(code,float(x0),float(x1),float(x1-x0))
-
-          doc=fitz.open('original-2009-june-language.pdf'); page=doc[0]
-          # T5 is the body Latin/symbol Type3 face on this document.
-          fx=None
+                      x0,y0,x1,y1=pen.bounds; source[ch]=(code,float(x0),float(x1))
+          doc=fitz.open('original-2009-june-language.pdf'); page=doc[0]; fx=None
           for f in page.get_fonts(full=True):
-              if f[2]=='Type3' and (str(f[3])=='T5' or str(f[4])=='T5'):
-                  fx=f[0]; break
-          if fx is None: raise SystemExit('T5 not found')
-          def ref(key):
-              kind,val=doc.xref_get_key(fx,key)
-              if kind!='xref': raise RuntimeError((key,kind,val))
+              if f[2]=='Type3' and (str(f[3])=='T5' or str(f[4])=='T5'): fx=f[0]; break
+          if fx is None: raise SystemExit('T5 missing')
+          def ref(k):
+              kind,val=doc.xref_get_key(fx,k)
+              if kind!='xref': raise RuntimeError((k,kind,val))
               return int(val.split()[0])
           widths=[float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?',doc.xref_object(ref('Widths'),compressed=False))]
-          enc_obj=doc.xref_object(ref('Encoding'),compressed=False)
-          mm=re.search(r'/Differences\s*\[(.*?)\]',enc_obj,re.S)
-          toks=re.findall(r'/[^\s\[\]]+|\d+',mm.group(1)); code_to_name={}; cur=None
-          for tok in toks:
-              if tok.startswith('/'):
-                  code_to_name[cur]=tok[1:]; cur+=1
-              else: cur=int(tok)
-          cp_obj=doc.xref_object(ref('CharProcs'),compressed=False)
-          name_to_xref={n:int(x) for n,x in re.findall(r'/([^\s/<>\[\]()]+)\s+(\d+)\s+0\s+R',cp_obj)}
-
-          # Use actual texttrace to associate PDF character codes (gid) with Unicode.
+          enc=doc.xref_object(ref('Encoding'),compressed=False); mm=re.search(r'/Differences\s*\[(.*?)\]',enc,re.S)
+          toks=re.findall(r'/[^\s\[\]]+|\d+',mm.group(1)); c2n={}; cur=None
+          for t in toks:
+              if t.startswith('/'): c2n[cur]=t[1:]; cur+=1
+              else: cur=int(t)
+          cpobj=doc.xref_object(ref('CharProcs'),compressed=False); n2x={n:int(x) for n,x in re.findall(r'/([^\s/<>\[\]()]+)\s+(\d+)\s+0\s+R',cpobj)}
           code_to_unicode={}
-          for pno in range(min(5,doc.page_count)):
+          for pno in range(doc.page_count):
               for span in doc[pno].get_texttrace():
                   if str(span.get('font',''))!='T5': continue
-                  for cp,gid,origin,bbox in span.get('chars',[]):
-                      code_to_unicode.setdefault(int(gid),int(cp))
-
-          def path_x(stream):
-              toks=re.findall(r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)|[A-Za-z]+',stream)
-              nums=[]; xs=[]; ar={'m':2,'l':2,'c':6,'v':4,'y':4,'re':4}
-              for tok in toks:
-                  try: nums.append(float(tok)); continue
+                  for cp,gid,origin,bbox in span.get('chars',[]): code_to_unicode.setdefault(int(gid),int(cp))
+          def path_x(text):
+              toks=re.findall(r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)|[A-Za-z]+',text); nums=[]; xs=[]; ar={'m':2,'l':2,'c':6,'v':4,'y':4,'re':4}
+              for t in toks:
+                  try: nums.append(float(t)); continue
                   except ValueError: pass
-                  if tok in ar and len(nums)>=ar[tok]:
-                      a=nums[-ar[tok]:]
-                      if tok in ('m','l'): xs.append(a[0])
-                      elif tok=='c': xs += [a[0],a[2],a[4]]
-                      elif tok in ('v','y'): xs += [a[0],a[2]]
+                  if t in ar and len(nums)>=ar[t]:
+                      a=nums[-ar[t]:]
+                      if t in ('m','l'): xs.append(a[0])
+                      elif t=='c': xs += [a[0],a[2],a[4]]
+                      elif t in ('v','y'): xs += [a[0],a[2]]
                       else: xs += [a[0],a[0]+a[2]]
                   nums=[]
               return (min(xs),max(xs)) if xs else (None,None)
-
-          print('\n=== SPSMJ SOURCE vs OFFICIAL T5 USED SYMBOLS ===')
-          print('char,U+,hnc,src_xmin,src_xmax,src_ink_w,src_center,pdf_code,pdf_width,t3_xmin,t3_xmax,t3_ink_w,t3_center,t3_center_minus_width_half,t3_lsb,t3_rsb')
+          print('\n=== SPSMJ SOURCE vs OFFICIAL T5 USED SYMBOLS ALL 15 PAGES ===')
+          print('char,U+,hnc,src_xmin,src_xmax,src_ink_w,src_center,pdf_code,pdf_width,t3_xmin,t3_xmax,t3_ink_w,t3_center,center_err,left_trim_candidate,right_trim_candidate')
           rows=[]
-          for pdf_code,cp in sorted(code_to_unicode.items()):
+          for code,cp in sorted(code_to_unicode.items()):
               try: ch=chr(cp)
               except ValueError: continue
-              if ch not in source or pdf_code>=len(widths): continue
-              name=code_to_name.get(pdf_code); px=name_to_xref.get(name or '')
+              if ch not in source or code>=len(widths): continue
+              name=c2n.get(code); px=n2x.get(name or '')
               if px is None: continue
-              sx0,sx1=source[ch][1],source[ch][2]
-              t0,t1=path_x(doc.xref_stream(px).decode('latin1','replace'))
+              sx0,sx1=source[ch][1],source[ch][2]; t0,t1=path_x(doc.xref_stream(px).decode('latin1','replace'))
               if t0 is None: continue
-              w=widths[pdf_code]; tc=(t0+t1)/2; sc=(sx0+sx1)/2
-              row=(ch,cp,source[ch][0],sx0,sx1,sx1-sx0,sc,pdf_code,w,t0,t1,t1-t0,tc,tc-w/2,t0,w-t1)
-              rows.append(row)
-              print(f'{ch!r},U+{cp:04X},0x{source[ch][0]:04X},{sx0:.1f},{sx1:.1f},{sx1-sx0:.1f},{sc:.1f},0x{pdf_code:02X},{w:.1f},{t0:.1f},{t1:.1f},{t1-t0:.1f},{tc:.1f},{tc-w/2:+.1f},{t0:.1f},{w-t1:.1f}')
-          if rows:
-              centered=[abs(r[13]) for r in rows]
-              print('rows=',len(rows),'median_abs_t3_center_error=',sorted(centered)[len(centered)//2],'max=',max(centered))
+              w=widths[code]; tc=(t0+t1)/2; sc=(sx0+sx1)/2
+              rows.append((ch,cp,source[ch][0],sx0,sx1,w,t0,t1))
+              print(f'{ch!r},U+{cp:04X},0x{source[ch][0]:04X},{sx0:.1f},{sx1:.1f},{sx1-sx0:.1f},{sc:.1f},0x{code:02X},{w:.1f},{t0:.1f},{t1:.1f},{t1-t0:.1f},{tc:.1f},{tc-w/2:+.1f},{1000-sx0:.1f},{sx1:.1f}')
+          print('joined_rows',len(rows))
+          print('WIDTH_CLASSES',sorted({r[5] for r in rows}))
           PY
 
       - uses: actions/upload-artifact@v7
