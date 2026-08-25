@@ -41,22 +41,25 @@ jobs:
           chmod +x rhwp/rhwp
           ./rhwp/rhwp capabilities > rhwp-capabilities.json
 
-      - name: Render untouched HWP with output_ttf
+      - name: Inspect and render untouched HWP
         shell: bash
         env:
           RHWP_FONT_PATH: ${{ github.workspace }}/output_ttf
         run: |
           set -euxo pipefail
-          mkdir -p out/svg
+          mkdir -p out/svg out/dump-pages
           ./rhwp/rhwp info input.hwp > out/info.txt
-          ./rhwp/rhwp export-svg input.hwp -p 0 -o out/svg
-          ./rhwp/rhwp export-pdf input.hwp -p 0 -o out/original-page1.pdf
-          ls -l out out/svg
+          for p in 0 1 2 3 4; do
+            ./rhwp/rhwp export-svg input.hwp -p "$p" -o out/svg
+            ./rhwp/rhwp export-pdf input.hwp -p "$p" -o "out/page-$((p+1)).pdf"
+            ./rhwp/rhwp dump-pages input.hwp -p "$p" > "out/dump-pages/page-$((p+1)).txt"
+          done
+          ls -l out out/svg out/dump-pages
 
       - name: Upload smoke-test artifact
         uses: actions/upload-artifact@v7
         with:
-          name: rhwp-smoke-page1
+          name: rhwp-smoke-pages
           path: |
             out/**
             rhwp-capabilities.json
