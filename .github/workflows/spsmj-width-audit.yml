@@ -1,0 +1,49 @@
+name: SPSMJ width audit
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/spsmj-width-audit.yml'
+      - 'tools/analyze_spsmj_type3_widths.py'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/spsmj-width-audit.yml'
+      - 'tools/analyze_spsmj_type3_widths.py'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download 2009 KICE oracle PDF
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://savetest.com/18' \
+            'https://t1.daumcdn.net/cfile/tistory/1542AA124CE785323E' \
+            -o original-2009-june-language.pdf
+
+      - name: Analyze complete T5/SPSMJ proportional-width mapping
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --quiet fonttools pymupdf
+          python tools/analyze_spsmj_type3_widths.py \
+            --pdf original-2009-june-language.pdf \
+            --csv spsmj-type3-full.csv \
+            | tee spsmj-type3-summary.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spsmj-width-audit
+          path: |
+            spsmj-type3-full.csv
+            spsmj-type3-summary.txt
+          if-no-files-found: error
