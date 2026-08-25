@@ -48,7 +48,19 @@ def main() -> None:
     new = '''                    let legacy_hft_bold = run.style.is_visually_bold()\n                        && is_legacy_hft_runtime_family(&run.style.font_family);\n                    if run.style.is_visually_bold() && !legacy_hft_bold {\n                        attrs.push_str(" font-weight=\\\"bold\\\"");\n                    } else if run.style.is_medium_weight() {\n                        attrs.push_str(" font-weight=\\\"500\\\"");\n                    }\n                    if legacy_hft_bold {\n                        attrs.push_str(&format!(\n                            " stroke=\\\"{}\\\" stroke-width=\\\"{:.2}\\\"",\n                            color, LEGACY_HFT_BOLD_STROKE_PX\n                        ));\n                    }\n'''
     replace_once(p, old, new, "legacy HFT rotated bold")
 
-    print("patched rhwp legacy HFT bold as Regular fill+stroke")
+    # Temporary DirectLayer diagnostics: establish whether --font-path faces
+    # are actually loaded by Skia and whether HFT family requests hit them.
+    p = root / "src/renderer/skia/renderer.rs"
+    old = '''        Self::load_typefaces_from_dirs(&self.font_mgr, &custom_dirs, &mut self.custom_typefaces);\n'''
+    new = '''        Self::load_typefaces_from_dirs(&self.font_mgr, &custom_dirs, &mut self.custom_typefaces);\n        let mut hft_debug_families: Vec<String> = self.custom_typefaces.keys().cloned().collect();\n        hft_debug_families.sort();\n        eprintln!("RHWP_DIRECT_CUSTOM_FAMILIES={:?}", hft_debug_families);\n'''
+    replace_once(p, old, new, "direct custom font census")
+
+    p = root / "src/renderer/skia/text_replay.rs"
+    old = '''                let primary_typeface = typeface_chain.first().cloned();\n'''
+    new = '''                let primary_typeface = typeface_chain.first().cloned();\n                if text.contains('‘') || text.contains('’') || text.contains('신') {\n                    let hft_debug_chain: Vec<String> =\n                        typeface_chain.iter().map(|tf| tf.family_name()).collect();\n                    let hft_debug_sample: String = text.chars().take(48).collect();\n                    eprintln!(\n                        "RHWP_DIRECT_TEXT family={:?} custom_exact={} chain={:?} text={:?}",\n                        style.font_family,\n                        self.custom_typefaces.contains_key(style.font_family.as_str()),\n                        hft_debug_chain,\n                        hft_debug_sample\n                    );\n                }\n'''
+    replace_once(p, old, new, "direct requested font trace")
+
+    print("patched rhwp legacy HFT bold as Regular fill+stroke + direct font trace")
 
 
 if __name__ == "__main__":
