@@ -88,6 +88,13 @@ jobs:
           grep -F '한양견명조' src/renderer/font_metrics_data.rs
           grep -F '신명 중명조 - 한양문자' src/renderer/font_metrics_data.rs
 
+      - name: Install native Skia font dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libfreetype6-dev libfontconfig1-dev
+
       - name: Build rhwp v0.8.4 with HFT-native bridges and direct PDF backend
         shell: bash
         run: |
