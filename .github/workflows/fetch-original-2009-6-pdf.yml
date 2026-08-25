@@ -20,7 +20,6 @@ jobs:
           URL='https://t1.daumcdn.net/cfile/tistory/1542AA124CE785323E'
           curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://savetest.com/18' "$URL" -o original-2009-june-language.pdf
           file original-2009-june-language.pdf
-          pdfinfo original-2009-june-language.pdf | head -30
       - name: Upload original PDF
         uses: actions/upload-artifact@v7
         with:
