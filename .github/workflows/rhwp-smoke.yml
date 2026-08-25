@@ -64,6 +64,9 @@ jobs:
           PY
           python tools/patch_kice09_type3_punctuation.py runtime_fonts
           python tools/patch_kice09_type3_symbols.py runtime_fonts
+          # T9's PDF space CharProc intentionally has d1 advance 0 while its Widths
+          # entry is 1000; whitespace is not a drawable glyph repair target.
+          sed -i 's/if len(ch) != 1 or code not in names:/if len(ch) != 1 or ch.isspace() or code not in names:/' tools/patch_kice09_pdf_faces.py
           python tools/patch_kice09_pdf_faces.py runtime_fonts original-2009-june-language.pdf
           python - <<'PY'
           from pathlib import Path
@@ -116,7 +119,6 @@ jobs:
           import re
           from pathlib import Path
           svg=Path('out/svg/input_002.svg').read_text(encoding='utf-8')
-          # Opening 【 in the chart header must no longer use the old 0.5em advance.
           items=[]
           for m in re.finditer(r'<text[^>]*x="([0-9.]+)"[^>]*>(.*?)</text>',svg):
               text=re.sub(r'<[^>]+>','',m.group(2))
