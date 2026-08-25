@@ -5,6 +5,10 @@ on:
     branches: [rhwp-smoke-20260825]
     paths:
       - '.github/workflows/rhwp-smoke.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/rhwp-smoke.yml'
 
 permissions:
   contents: read
