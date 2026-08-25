@@ -52,6 +52,7 @@ jobs:
               f.save(out)
           PY
           python tools/patch_kice09_type3_punctuation.py runtime_fonts
+          python tools/patch_kice09_type3_symbols.py runtime_fonts
 
       - name: Build rhwp v0.8.4 with KICE09 font and layout bridges
         shell: bash
@@ -85,14 +86,10 @@ jobs:
           p.write_text(s.replace(strike,strike_new,1),encoding='utf-8')
 
           # 3) Floating shape anchored to a later line of a paragraph.
-          # HWP stores Para-relative offsets from the line containing the control slot,
-          # not unconditionally from the paragraph's first line.  Without this, the
-          # <보기> label box in 2009 June Q12 is painted one line too high and masks
-          # the end of the question.
           p=Path('rhwp-src/src/renderer/layout/shape_layout.rs')
           s=p.read_text(encoding='utf-8')
           old='''        // 통합 좌표 계산 (layout_body_picture와 동일 로직)\n        let shape_container = LayoutRect {\n            x: col_area.x + para_margin_left,\n            y: para_y,\n            width: col_area.width - para_margin_left - para_margin_right,\n            height: col_area.height - (para_y - col_area.y).max(0.0),\n        };\n'''
-          new='''        // Para-relative floating objects are anchored to the LINE_SEG that\n        // contains their control slot.  HWP's vertical_offset is relative to that\n        // anchor line, not always to the paragraph's first line.\n        let shape_para_y = if !common.treat_as_char\n            && matches!(common.vert_rel_to, crate::model::shape::VertRelTo::Para)\n            && para.line_segs.len() > 1\n        {\n            let text_len = para.text.chars().count();\n            let control_pos = para\n                .control_text_positions()\n                .get(control_index)\n                .copied()\n                .unwrap_or(text_len);\n            let utf16_pos = if control_pos < para.char_offsets.len() {\n                para.char_offsets[control_pos]\n            } else {\n                u32::MAX\n            };\n            let anchor_seg = if control_pos >= text_len {\n                para.line_segs.last()\n            } else {\n                para.line_segs\n                    .iter()\n                    .rev()\n                    .find(|seg| seg.text_start <= utf16_pos)\n            };\n            para_y + anchor_seg\n                .map(|seg| hwpunit_to_px(seg.vertical_pos, self.dpi))\n                .unwrap_or(0.0)\n        } else {\n            para_y\n        };\n\n        // 통합 좌표 계산 (layout_body_picture와 동일 로직)\n        let shape_container = LayoutRect {\n            x: col_area.x + para_margin_left,\n            y: shape_para_y,\n            width: col_area.width - para_margin_left - para_margin_right,\n            height: col_area.height - (shape_para_y - col_area.y).max(0.0),\n        };\n'''
+          new='''        // Para-relative floating objects are anchored to the LINE_SEG that\n        // contains their control slot. HWP's vertical_offset is relative to that\n        // anchor line, not always to the paragraph's first line.\n        let shape_para_y = if !common.treat_as_char\n            && matches!(common.vert_rel_to, crate::model::shape::VertRelTo::Para)\n            && para.line_segs.len() > 1\n        {\n            let text_len = para.text.chars().count();\n            let control_pos = para\n                .control_text_positions()\n                .get(control_index)\n                .copied()\n                .unwrap_or(text_len);\n            let utf16_pos = if control_pos < para.char_offsets.len() {\n                para.char_offsets[control_pos]\n            } else {\n                u32::MAX\n            };\n            let anchor_seg = if control_pos >= text_len {\n                para.line_segs.last()\n            } else {\n                para.line_segs\n                    .iter()\n                    .rev()\n                    .find(|seg| seg.text_start <= utf16_pos)\n            };\n            para_y + anchor_seg\n                .map(|seg| hwpunit_to_px(seg.vertical_pos, self.dpi))\n                .unwrap_or(0.0)\n        } else {\n            para_y\n        };\n\n        // 통합 좌표 계산 (layout_body_picture와 동일 로직)\n        let shape_container = LayoutRect {\n            x: col_area.x + para_margin_left,\n            y: shape_para_y,\n            width: col_area.width - para_margin_left - para_margin_right,\n            height: col_area.height - (shape_para_y - col_area.y).max(0.0),\n        };\n'''
           if old not in s:
               raise SystemExit('shape_container block not found')
           s=s.replace(old,new,1)
@@ -101,6 +98,19 @@ jobs:
           if old_call not in s:
               raise SystemExit('compute_object_position para_y call not found')
           p.write_text(s.replace(old_call,new_call,1),encoding='utf-8')
+
+          # 4) Paragraph numbering marker style.
+          # The HWP numbering definition has its own charShapeRef (KICE09 numbering 1,
+          # level 0 -> charPr 10 / Hanyang GyeonMyeongjo). rhwp v0.8.4 instead paints
+          # the marker using the first body run, making 1.-45. thin and the wrong face.
+          # Keep this bridge narrowly scoped to the 108-charPr KICE09 master.
+          p=Path('rhwp-src/src/renderer/layout/paragraph_layout.rs')
+          s=p.read_text(encoding='utf-8')
+          old='''fn numbering_marker_text_style(\n    styles: &ResolvedStyleSet,\n    para: Option<&Paragraph>,\n    first_run: Option<&ComposedTextRun>,\n) -> TextStyle {\n    if let Some(run) = first_run {\n        resolved_to_text_style(styles, run.char_style_id, run.lang_index)\n    } else {\n        paragraph_active_text_style(styles, para, 0).0\n    }\n}\n'''
+          new='''fn numbering_marker_text_style(\n    styles: &ResolvedStyleSet,\n    para: Option<&Paragraph>,\n    first_run: Option<&ComposedTextRun>,\n) -> TextStyle {\n    // KICE09: NUMBER id=1 level=0 explicitly points at charPr 10.\n    // v0.8.4 drops NumberingHead.char_shape_id at paint time and inherits the\n    // first body run instead, so question numbers lose their original face/weight.\n    if styles.char_styles.len() == 108 {\n        if let Some(para) = para {\n            if let Some(ps) = styles.para_styles.get(para.para_shape_id as usize) {\n                if matches!(ps.head_type, HeadType::Number)\n                    && ps.numbering_id == 1\n                    && ps.para_level == 0\n                {\n                    return resolved_to_text_style(styles, 10, 0);\n                }\n            }\n        }\n    }\n    if let Some(run) = first_run {\n        resolved_to_text_style(styles, run.char_style_id, run.lang_index)\n    } else {\n        paragraph_active_text_style(styles, para, 0).0\n    }\n}\n'''
+          if old not in s:
+              raise SystemExit('numbering_marker_text_style block not found')
+          p.write_text(s.replace(old,new,1),encoding='utf-8')
           PY
           cd rhwp-src
           cargo build --release --bin rhwp
