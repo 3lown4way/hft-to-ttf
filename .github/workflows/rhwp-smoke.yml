@@ -51,6 +51,7 @@ jobs:
                       else: n.string=ps.encode('latin1')
               f.save(out)
           PY
+          python tools/patch_kice09_type3_punctuation.py runtime_fonts
 
       - name: Build rhwp v0.8.4 with KICE09 font and layout bridges
         shell: bash
