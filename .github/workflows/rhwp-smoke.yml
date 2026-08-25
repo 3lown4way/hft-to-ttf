@@ -1,4 +1,5 @@
 name: rhwp HWP smoke test
+# isolated PR trigger
 
 on:
   push:
