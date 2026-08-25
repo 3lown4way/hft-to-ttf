@@ -1,0 +1,100 @@
+name: quote Type3 audit
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/quote-type3-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download oracle PDF
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://savetest.com/18' \
+            'https://t1.daumcdn.net/cfile/tistory/1542AA124CE785323E' \
+            -o original-2009-june-language.pdf
+
+      - name: Audit quote horizontal semantics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --quiet pymupdf fonttools
+          python - <<'PY' | tee quote-type3-audit.txt
+          import io, re, sys, tempfile, zipfile
+          from pathlib import Path
+          import fitz
+          from fontTools.ttLib import TTFont
+
+          ROOT=Path('.')
+          conv=ROOT/'converter'/'KICE09_HFT_converter_v3_4'
+          sys.path.insert(0,str(conv))
+          from hft_core_v34 import iter_unicode_glyphs, iter_raw_records, read_meta, _char_for_record
+
+          with tempfile.TemporaryDirectory() as td:
+              td=Path(td)
+              with zipfile.ZipFile(ROOT/'inputs'/'kice09-required48.zip') as z:
+                  z.extract('SPSMJ.HFT',td)
+              p=td/'SPSMJ.HFT'
+              print('=== HFT SOURCE ===')
+              meta=read_meta(p)
+              for item in iter_unicode_glyphs(p):
+                  if item.char in '‘’“”':
+                      coords,_e,_f=item.glyph.getCoordinates(None)
+                      xs=[x for x,_ in coords]
+                      print(repr(item.char), 'code', hex(item.internal_code), 'advance', item.advance,
+                            'xmin', min(xs), 'xmax', max(xs))
+              for idx,code,adv,ops,enc in iter_raw_records(p):
+                  ch=_char_for_record(meta,idx,code)
+                  if ch in '‘’“”':
+                      print('RAW',repr(ch),'first_ops',ops[:3],'enc',enc)
+
+          doc=fitz.open('original-2009-june-language.pdf')
+          print('\n=== ORACLE FONTS / QUOTE TRACE ===')
+          seen_fonts=set()
+          for pno in range(min(5,doc.page_count)):
+              page=doc[pno]
+              print('PAGE',pno+1)
+              for f in page.get_fonts(full=True):
+                  print(' FONT',f)
+              for sp in page.get_texttrace():
+                  for ch in sp.get('chars',[]):
+                      cp,gid,origin,bbox=ch
+                      c=chr(cp)
+                      if c in '‘’“”':
+                          key=(pno,sp.get('font'),gid)
+                          print(' QUOTE',repr(c),'font',sp.get('font'),'gid',gid,'size',sp.get('size'),
+                                'origin',origin,'bbox',bbox)
+                          seen_fonts.add(sp.get('font'))
+              print()
+
+          print('=== TYPE3 OBJECTS FOR QUOTE FONTS ===')
+          for pno in range(min(5,doc.page_count)):
+              page=doc[pno]
+              for f in page.get_fonts(full=True):
+                  xref,ext,typ,basefont,resname,enc,*rest=f
+                  if basefont not in seen_fonts and resname not in seen_fonts:
+                      continue
+                  print('PAGE',pno+1,'xref',xref,'ext',ext,'type',typ,'basefont',basefont,'resname',resname,'enc',enc)
+                  print(doc.xref_object(xref,compressed=False))
+                  for key in ('CharProcs','Encoding','FontMatrix','FontBBox','Widths','FirstChar','LastChar','ToUnicode'):
+                      try:
+                          print(' ',key,doc.xref_get_key(xref,key))
+                      except Exception as e:
+                          print(' ',key,'ERR',e)
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: quote-type3-audit
+          path: quote-type3-audit.txt
+          if-no-files-found: error
