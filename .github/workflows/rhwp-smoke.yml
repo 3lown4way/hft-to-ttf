@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/rhwp-smoke.yml'
       - 'tools/patch_rhwp_hft_native.py'
+      - 'tools/patch_rhwp_hft_synthetic_bold.py'
       - 'tools/audit_hft_source_truth.py'
       - 'converter/KICE09_HFT_converter_v3_4/**'
       - 'output_ttf/**'
@@ -14,6 +15,7 @@ on:
     paths:
       - '.github/workflows/rhwp-smoke.yml'
       - 'tools/patch_rhwp_hft_native.py'
+      - 'tools/patch_rhwp_hft_synthetic_bold.py'
       - 'tools/audit_hft_source_truth.py'
       - 'converter/KICE09_HFT_converter_v3_4/**'
       - 'output_ttf/**'
@@ -89,6 +91,7 @@ jobs:
         run: |
           set -euxo pipefail
           python tools/patch_rhwp_hft_native.py rhwp-src
+          python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
           cd rhwp-src
           cargo build --release --bin rhwp
           ./target/release/rhwp capabilities > ../rhwp-capabilities.json
@@ -137,7 +140,37 @@ jobs:
                       if '10.' in txt:
                           print('QUESTION10_NODE', path.name, repr(txt[:120]), node[:500].replace('\n',' '))
                           break
-          print('BOLD_MARKER', any('font-weight="bold"' in p.read_text(encoding='utf-8') for p in svgs))
+          all_svg='\n'.join(p.read_text(encoding='utf-8') for p in svgs)
+          print('LEGACY_HFT_BOLD_STROKE', 'stroke-width="0.16"' in all_svg)
+          print('GENERIC_BOLD_MARKER', 'font-weight="bold"' in all_svg)
+          PY
+
+      - name: Verify legacy HFT bold paint semantics
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          grep -R -F 'stroke-width="0.16"' out/svg/input_002.svg
+          # Career-table heading brackets are legacy HFT Bold.  They must use
+          # Regular-face fill+stroke rather than browser/CSS synthetic bold.
+          python - <<'PY'
+          import re, html
+          from pathlib import Path
+          s=Path('out/svg/input_002.svg').read_text(encoding='utf-8')
+          nodes=[]
+          for m in re.finditer(r'<text\b[^>]*>.*?</text>', s, re.S):
+              node=m.group(0)
+              txt=html.unescape(re.sub(r'<[^>]+>', '', node))
+              if txt in {'【','】'} and '신명 중명조 - 한양문자' in html.unescape(node):
+                  nodes.append(node)
+          if not nodes:
+              raise SystemExit('career-heading legacy HFT bold sample not found')
+          for node in nodes:
+              if 'stroke-width="0.16"' not in node:
+                  raise SystemExit('legacy HFT bold is missing fill+stroke paint')
+              if 'font-weight="bold"' in node:
+                  raise SystemExit('legacy HFT bold still asks for synthetic/separate bold face')
+          print('OK legacy HFT bold brackets use Regular fill+stroke:', len(nodes))
           PY
 
       - name: Upload smoke-test artifact
