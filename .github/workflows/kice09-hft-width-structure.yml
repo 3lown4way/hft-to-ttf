@@ -1,0 +1,102 @@
+name: KICE09 HFT width structure
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/kice09-hft-width-structure.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/kice09-hft-width-structure.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Locate proportional width structures in KICE09 HFT
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' | tee kice09-hft-width-structure.txt
+          import zipfile,struct
+          from pathlib import Path
+
+          known={0x3404:384,0x340E:230,0x340F:230,0x3410:441,0x3411:441,
+                 0x3466:1000,0x3590:1000,0x3591:1000,0x36E7:1000,0x36E8:1000}
+          with zipfile.ZipFile('inputs/kice09-required48.zip') as z:
+              names={Path(n).name.upper():n for n in z.namelist() if not n.endswith('/')}
+              for font in ('SPSMJ.HFT','SPJGT.HFT','TETGRSP.HFT'):
+                  b=z.read(names[font])
+                  print('\n'+'='*80)
+                  print(font,'size',len(b))
+                  print('header u16 0x200..0x240:',[(hex(o),struct.unpack_from('<H',b,o)[0]) for o in range(0x200,0x240,2)])
+                  print('header u32 0x200..0x240:',[(hex(o),struct.unpack_from('<I',b,o)[0]) for o in range(0x200,0x240,4)])
+                  if font!='SPSMJ.HFT':
+                      continue
+                  print('--- exact contiguous int16 width-table candidates ---')
+                  candidates=[]
+                  needle=struct.pack('<H',230)
+                  q=0
+                  while True:
+                      q=b.find(needle,q)
+                      if q<0: break
+                      for basecode in (0x3400,0x3401):
+                          start=q-(0x340E-basecode)*2
+                          if start<0: continue
+                          ok=True
+                          got=[]
+                          for c,v in known.items():
+                              off=start+(c-basecode)*2
+                              if off<0 or off+2>len(b): ok=False; break
+                              g=struct.unpack_from('<H',b,off)[0]
+                              got.append((c,g))
+                              if g!=v: ok=False; break
+                          if ok:
+                              candidates.append((start,basecode))
+                      q+=1
+                  print('candidate_count',len(candidates))
+                  for start,basecode in candidates:
+                      print('CAND start',hex(start),'basecode',hex(basecode))
+                      vals=[struct.unpack_from('<h',b,start+2*i)[0] for i in range(48)]
+                      print(' first48',vals)
+                      lo=max(0,start-48); hi=min(len(b),start+16)
+                      print(' preamble_hex',b[lo:hi].hex(' '))
+                      print(' preamble_u16',[(hex(o),struct.unpack_from('<H',b,o)[0]) for o in range(lo+(lo&1),hi-1,2)])
+
+                  print('--- start/end/type marker candidates ---')
+                  for startcode,endcode in ((0x3400,0x37ff),(0x3400,0x37bf)):
+                      pat=struct.pack('<HH',startcode,endcode)
+                      pos=0
+                      while True:
+                          i=b.find(pat,pos)
+                          if i<0: break
+                          lo=max(0,i-24); hi=min(len(b),i+48)
+                          print('range',hex(startcode),hex(endcode),'at',hex(i),'window',b[lo:hi].hex(' '))
+                          pos=i+1
+
+                  print('--- all occurrences of core width sequence components near each other ---')
+                  # Look for 384 then two 230s and two 441s within a 256-byte window, independent of exact indexing.
+                  positions={v:[] for v in (384,230,441,1000)}
+                  for v in positions:
+                      p=0; pat=struct.pack('<H',v)
+                      while True:
+                          p=b.find(pat,p)
+                          if p<0: break
+                          positions[v].append(p); p+=1
+                  for p384 in positions[384]:
+                      near230=[p for p in positions[230] if p384-64<=p<=p384+256]
+                      near441=[p for p in positions[441] if p384-64<=p<=p384+256]
+                      if len(near230)>=2 and len(near441)>=2:
+                          print('cluster around',hex(p384),'230',list(map(hex,near230[:8])),'441',list(map(hex,near441[:8])))
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kice09-hft-width-structure
+          path: kice09-hft-width-structure.txt
+          if-no-files-found: error
