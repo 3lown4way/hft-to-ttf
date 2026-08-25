@@ -1,0 +1,54 @@
+name: Hancom HFT engine audit
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/hancom-hft-engine-audit.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/hancom-hft-engine-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download and extract official viewer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -H 'Referer: https://www.hancom.com/' -A 'Mozilla/5.0' \
+            'https://cdn.hancom.com/pds/hnc/VIE/hancomoffice-hwpviewer-Ubuntu-amd64.deb' -o hancom-viewer.deb
+          mkdir deb && cd deb && ar x ../hancom-viewer.deb && tar -xf data.tar.* && cd ..
+      - name: Locate HFT engine references and metric-related symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > hancom-hft-engine-audit.txt
+          echo '=== FILES WITH HFT SIGNATURE / .HFT STRINGS ===' >> hancom-hft-engine-audit.txt
+          while IFS= read -r -d '' f; do
+            if grep -a -q -E 'Han Unified Font File|\.HFT|\.hft|HFTInfo' "$f" 2>/dev/null; then
+              echo "FILE $f size=$(stat -c%s "$f") type=$(file -b "$f")" >> hancom-hft-engine-audit.txt
+              strings -a "$f" | grep -Ei 'Han Unified Font File|\.HFT|HFTInfo|glyph|advance|width|metric|font' | head -n 240 >> hancom-hft-engine-audit.txt || true
+              if file "$f" | grep -q ELF; then
+                echo '--- dynamic symbols ---' >> hancom-hft-engine-audit.txt
+                nm -D -C "$f" 2>/dev/null | grep -Ei 'hft|glyph|advance|width|metric|font' | head -n 240 >> hancom-hft-engine-audit.txt || true
+              fi
+              echo >> hancom-hft-engine-audit.txt
+            fi
+          done < <(find deb/usr -type f -print0)
+
+          echo '=== LIKELY FONT ENGINE LIBRARIES BY NAME ===' >> hancom-hft-engine-audit.txt
+          find deb/usr -type f | grep -Ei '/[^/]*(font|hwp|hft|type|text)[^/]*\.(so|so\.|bin)|/[^/]*(font|hwp|hft|type|text)[^/]*$' | sort | head -n 300 >> hancom-hft-engine-audit.txt || true
+          cat hancom-hft-engine-audit.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hancom-hft-engine-audit
+          path: hancom-hft-engine-audit.txt
+          if-no-files-found: error
