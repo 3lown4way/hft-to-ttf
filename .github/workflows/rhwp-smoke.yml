@@ -28,7 +28,7 @@ permissions:
 jobs:
   render:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - name: Checkout font repo
         uses: actions/checkout@v7
@@ -88,14 +88,14 @@ jobs:
           grep -F '한양견명조' src/renderer/font_metrics_data.rs
           grep -F '신명 중명조 - 한양문자' src/renderer/font_metrics_data.rs
 
-      - name: Build rhwp v0.8.4 with HFT-native bridges
+      - name: Build rhwp v0.8.4 with HFT-native bridges and direct PDF backend
         shell: bash
         run: |
           set -euxo pipefail
           python tools/patch_rhwp_hft_native.py rhwp-src
           python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
           cd rhwp-src
-          cargo build --release --bin rhwp
+          cargo build --release --features native-skia --bin rhwp
           ./target/release/rhwp capabilities > ../rhwp-capabilities.json
 
       - name: Render untouched HWP with HFT-derived faces
@@ -105,16 +105,23 @@ jobs:
         run: |
           set -euxo pipefail
           RHWP='./rhwp-src/target/release/rhwp'
-          mkdir -p out/svg out/dump-pages
+          mkdir -p out/svg out/dump-pages out/direct
           "$RHWP" info input.hwp > out/info.txt
+          : > out/direct/direct-status.txt
           for p in 0 1 2 3 4; do
             "$RHWP" export-svg input.hwp -p "$p" -o out/svg
             "$RHWP" export-pdf input.hwp -p "$p" --text-as-paths -o "out/page-$((p+1))-paths.pdf"
             "$RHWP" export-pdf input.hwp -p "$p" -o "out/page-$((p+1))-embedded.pdf"
+            if "$RHWP" export-pdf input.hwp -p "$p" --backend direct --font-path "${{ github.workspace }}/runtime_fonts" -o "out/direct/page-$((p+1))-embedded.pdf" 2>"out/direct/page-$((p+1))-stderr.txt"; then
+              echo "page-$((p+1)) direct=success" | tee -a out/direct/direct-status.txt
+            else
+              status=$?
+              echo "page-$((p+1)) direct=failed:$status" | tee -a out/direct/direct-status.txt
+            fi
             "$RHWP" dump-pages input.hwp -p "$p" > "out/dump-pages/page-$((p+1)).txt"
           done
 
-      - name: Compare comma and quotation-mark Y placement against oracle PDF
+      - name: Compare compatibility PDF punctuation Y placement against oracle PDF
         if: success()
         shell: bash
         run: |
@@ -127,6 +134,23 @@ jobs:
             --dpi 600 \
             --out-dir out/baseline-audit \
             | tee out/baseline-audit-console.txt
+
+      - name: Compare direct Skia PDF punctuation Y placement against oracle PDF
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if find out/direct -maxdepth 1 -name 'page-*-embedded.pdf' -print -quit | grep -q .; then
+            python tools/compare_pdf_punctuation_baselines.py \
+              --oracle original-2009-june-language.pdf \
+              --generated-dir out/direct \
+              --pages 5 \
+              --dpi 600 \
+              --out-dir out/direct/baseline-audit \
+              | tee out/direct/baseline-audit-console.txt
+          else
+            echo 'No direct PDF pages were generated.' | tee out/direct/baseline-audit-console.txt
+          fi
 
       - name: Collect non-blocking SVG diagnostics
         if: always()
