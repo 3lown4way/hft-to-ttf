@@ -5,18 +5,18 @@ on:
     branches: [rhwp-smoke-20260825]
     paths:
       - '.github/workflows/rhwp-smoke.yml'
-      - 'tools/patch_rhwp_kice09.py'
-      - 'tools/patch_kice09_type3_punctuation.py'
-      - 'tools/patch_kice09_type3_symbols.py'
-      - 'tools/patch_kice09_pdf_faces.py'
+      - 'tools/patch_rhwp_hft_native.py'
+      - 'tools/audit_hft_source_truth.py'
+      - 'converter/KICE09_HFT_converter_v3_4/**'
+      - 'output_ttf/**'
   pull_request:
     branches: [main, rhwp-ci-base]
     paths:
       - '.github/workflows/rhwp-smoke.yml'
-      - 'tools/patch_rhwp_kice09.py'
-      - 'tools/patch_kice09_type3_punctuation.py'
-      - 'tools/patch_kice09_type3_symbols.py'
-      - 'tools/patch_kice09_pdf_faces.py'
+      - 'tools/patch_rhwp_hft_native.py'
+      - 'tools/audit_hft_source_truth.py'
+      - 'converter/KICE09_HFT_converter_v3_4/**'
+      - 'output_ttf/**'
 
 permissions:
   contents: read
@@ -29,7 +29,7 @@ jobs:
       - name: Checkout font repo
         uses: actions/checkout@v7
 
-      - name: Download original 2009 June HWP and PDF oracles
+      - name: Download original 2009 June HWP and PDF oracle
         shell: bash
         run: |
           set -euxo pipefail
@@ -37,65 +37,68 @@ jobs:
           PDF_URL='https://t1.daumcdn.net/cfile/tistory/1542AA124CE785323E'
           curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://legendstudy.com/223' "$HWP_URL" -o input.hwp
           echo '59af2533f5a12fee6685f9c9f3b8a646a54997badaba3c062138c7d04f5e6205  input.hwp' | sha256sum -c -
+          # PDF is comparison-only.  No glyph or metric is imported from it.
           curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://savetest.com/18' "$PDF_URL" -o original-2009-june-language.pdf
           file original-2009-june-language.pdf
 
-      - name: Prepare KICE09 regular and real-bold runtime faces
+      - name: Audit HFT source truth
         shell: bash
         run: |
           set -euxo pipefail
-          python -m pip install --quiet fonttools pypdf
+          python -m pip install --quiet fonttools
+          python tools/audit_hft_source_truth.py | tee hft-source-audit.txt
+
+      - name: Prepare runtime faces without PDF glyph repair
+        shell: bash
+        run: |
+          set -euxo pipefail
           mkdir -p runtime_fonts
           python - <<'PY'
           from fontTools.ttLib import TTFont
           from pathlib import Path
           import shutil
-          src=Path('output_ttf'); dst=Path('runtime_fonts')
+
+          src=Path('output_ttf')
+          dst=Path('runtime_fonts')
           for i,p in enumerate(sorted(src.glob('*.ttf')),1):
               out=dst/p.name
               shutil.copy2(p,out)
+              # Keep family/subfamily names intact for rhwp metric lookup, while
+              # making PostScript names unique for SVG/PDF embedding.
               f=TTFont(out)
-              ps=f'KICE09Combo{i:02d}-Regular'
+              ps=f'KICE09HFT{i:02d}-Regular'
               for n in f['name'].names:
                   if n.nameID==6:
                       if n.isUnicode(): n.string=ps.encode('utf-16-be')
                       else: n.string=ps.encode('latin1')
               f.save(out)
+          print('runtime fonts', len(list(dst.glob('*.ttf'))))
           PY
-          python tools/patch_kice09_type3_punctuation.py runtime_fonts
-          python tools/patch_kice09_type3_symbols.py runtime_fonts
-          # T9's PDF space CharProc intentionally has d1 advance 0 while its Widths
-          # entry is 1000; whitespace is not a drawable glyph repair target.
-          sed -i 's/if len(ch) != 1 or code not in names:/if len(ch) != 1 or ch.isspace() or code not in names:/' tools/patch_kice09_pdf_faces.py
-          python tools/patch_kice09_pdf_faces.py runtime_fonts original-2009-june-language.pdf
-          python - <<'PY'
-          from pathlib import Path
-          from fontTools.ttLib import TTFont
-          for p in sorted(Path('runtime_fonts').glob('*Bold.ttf')):
-              f=TTFont(p)
-              fam=[]; sub=[]; ps=[]
-              for n in f['name'].names:
-                  if n.nameID in (1,2,6) and n.platformID==3:
-                      try: val=n.toUnicode()
-                      except Exception: continue
-                      if n.nameID==1: fam.append(val)
-                      elif n.nameID==2: sub.append(val)
-                      else: ps.append(val)
-              print('BOLD_FACE',p.name,'family=',fam[:1],'sub=',sub[:1],'ps=',ps[:1],
-                    'weight=',getattr(f.get('OS/2'),'usWeightClass',None))
-          PY
+          # Guard against accidentally re-introducing the old PDF/Type3 repair lane.
+          test ! -e runtime_fonts/.pdf-patched
 
-      - name: Build rhwp v0.8.4 with KICE09 bridges
+      - name: Build rhwp metric generator and inject runtime TTF hmtx
         shell: bash
         run: |
           set -euxo pipefail
           git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
-          python tools/patch_rhwp_kice09.py rhwp-src
+          cd rhwp-src
+          cargo build --release --bin font-metric-gen
+          ./target/release/font-metric-gen --dir ../runtime_fonts --output src/renderer/font_metrics_data.rs \
+            | tee ../runtime-font-metric-gen.txt
+          grep -F '한양견명조' src/renderer/font_metrics_data.rs
+          grep -F '신명 중명조 - 한양문자' src/renderer/font_metrics_data.rs
+
+      - name: Build rhwp v0.8.4 with HFT-native bridges
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python tools/patch_rhwp_hft_native.py rhwp-src
           cd rhwp-src
           cargo build --release --bin rhwp
           ./target/release/rhwp capabilities > ../rhwp-capabilities.json
 
-      - name: Render untouched HWP with KICE09 faces
+      - name: Render untouched HWP with HFT-derived faces
         shell: bash
         env:
           RHWP_FONT_PATH: ${{ github.workspace }}/runtime_fonts
@@ -111,41 +114,75 @@ jobs:
             "$RHWP" dump-pages input.hwp -p "$p" > "out/dump-pages/page-$((p+1)).txt"
           done
 
-      - name: Verify KICE09 bracket advance and bold markers
+      - name: Verify source-metric bracket and numbering style
         shell: bash
         run: |
           set -euxo pipefail
           python - <<'PY'
-          import re
+          import html, re
           from pathlib import Path
-          svg=Path('out/svg/input_002.svg').read_text(encoding='utf-8')
-          items=[]
-          for m in re.finditer(r'<text[^>]*x="([0-9.]+)"[^>]*>(.*?)</text>',svg):
-              text=re.sub(r'<[^>]+>','',m.group(2))
-              items.append((float(m.group(1)),text,m.group(0)))
-          found=False
-          for i,(x,t,raw) in enumerate(items[:-1]):
-              if t=='【' and 'font-weight="bold"' in raw:
-                  nx,nt,_=items[i+1]
-                  if nt and nt!='】':
-                      adv=nx-x
-                      print('BOLD_OPEN_BRACKET_ADV',adv,'next=',nt)
-                      if adv < 8.0:
-                          raise SystemExit(f'opening bracket advance still too narrow: {adv}')
-                      found=True
-                      break
-          if not found:
-              raise SystemExit('bold opening bracket sample not found')
-          if 'font-weight="bold"' not in svg:
+
+          svgs=list(Path('out/svg').glob('*.svg'))
+          if not svgs:
+              raise SystemExit('no SVG output')
+
+          # 1) 【 must get its advance from the generated TTF metric DB.  The old
+          # fallback was about half-em and visibly overprinted the following Hangul.
+          bracket_ok=False
+          for path in svgs:
+              s=path.read_text(encoding='utf-8')
+              items=[]
+              for m in re.finditer(r'<text[^>]*x="([0-9.]+)"[^>]*>(.*?)</text>',s):
+                  text=html.unescape(re.sub(r'<[^>]+>','',m.group(2)))
+                  items.append((float(m.group(1)), text, m.group(0)))
+              for i,(x,t,raw) in enumerate(items[:-1]):
+                  if t=='【':
+                      nx,nt,_=items[i+1]
+                      if nt and nt!='】':
+                          adv=nx-x
+                          print('OPEN_BRACKET_ADV',path.name,adv,'next=',nt)
+                          if adv < 8.0:
+                              raise SystemExit(f'opening bracket still has heuristic narrow advance: {adv}')
+                          bracket_ok=True
+                          break
+              if bracket_ok:
+                  break
+          if not bracket_ok:
+              raise SystemExit('opening bracket sample not found')
+
+          # 2) Question marker style must come from NumberingHead.char_shape_id,
+          # not the first body run.  KICE09 numbering head resolves to the
+          # source-derived 한양견명조 composite.
+          number_ok=False
+          for path in svgs:
+              s=path.read_text(encoding='utf-8')
+              for m in re.finditer(r'<text[^>]*>\s*10\.\s*</text>',s):
+                  raw=m.group(0)
+                  print('QUESTION_10_NODE',path.name,raw[:300])
+                  if '한양견명조' not in raw:
+                      raise SystemExit('question 10 is not using NumberingHead char shape font')
+                  number_ok=True
+                  break
+              if number_ok:
+                  break
+          if not number_ok:
+              raise SystemExit('question 10 text node not found')
+
+          # Bold semantics must at least survive HWP parsing/style resolution.
+          # Exact Hancom synthetic-bold geometry is a separate fidelity stage.
+          if not any('font-weight="bold"' in p.read_text(encoding='utf-8') for p in svgs):
               raise SystemExit('bold SVG markers missing')
           PY
 
       - name: Upload smoke-test artifact
         uses: actions/upload-artifact@v7
         with:
-          name: rhwp-kice09-composite-pages
+          name: rhwp-kice09-hft-native-pages
           path: |
             out/**
+            hft-source-audit.txt
+            runtime-font-metric-gen.txt
             rhwp-capabilities.json
+            rhwp-src/src/renderer/font_metrics_data.rs
           if-no-files-found: error
           compression-level: 0
