@@ -52,7 +52,7 @@ jobs:
               f.save(out)
           PY
 
-      - name: Build rhwp v0.8.4 with KICE09 font and decoration bridges
+      - name: Build rhwp v0.8.4 with KICE09 font and layout bridges
         shell: bash
         run: |
           set -euxo pipefail
@@ -69,11 +69,7 @@ jobs:
               raise SystemExit('target resolve_char_styles block not found')
           p.write_text(s.replace(old,new,1),encoding='utf-8')
 
-          # 2) SVG/PDF decoration width bridge.
-          # Preserve the legacy width for normal runs. Only when the run contains
-          # trailing whitespace do we trim that invisible tail and end the decoration
-          # at the natural advance of the final visible glyph. This avoids perturbing
-          # short underlines that were already correct.
+          # 2) SVG/PDF decoration width bridge: trim only actual trailing whitespace.
           p=Path('rhwp-src/src/renderer/svg.rs')
           s=p.read_text(encoding='utf-8')
           marker='''        // 밑줄 처리\n        if !matches!(style.underline, UnderlineType::None) {\n            let text_width = *char_positions.last().unwrap_or(&0.0);\n'''
@@ -86,6 +82,24 @@ jobs:
           if strike not in s:
               raise SystemExit('strike width marker not found')
           p.write_text(s.replace(strike,strike_new,1),encoding='utf-8')
+
+          # 3) Floating shape anchored to a later line of a paragraph.
+          # HWP stores Para-relative offsets from the line containing the control slot,
+          # not unconditionally from the paragraph's first line.  Without this, the
+          # <보기> label box in 2009 June Q12 is painted one line too high and masks
+          # the end of the question.
+          p=Path('rhwp-src/src/renderer/layout/shape_layout.rs')
+          s=p.read_text(encoding='utf-8')
+          old='''        // 통합 좌표 계산 (layout_body_picture와 동일 로직)\n        let shape_container = LayoutRect {\n            x: col_area.x + para_margin_left,\n            y: para_y,\n            width: col_area.width - para_margin_left - para_margin_right,\n            height: col_area.height - (para_y - col_area.y).max(0.0),\n        };\n'''
+          new='''        // Para-relative floating objects are anchored to the LINE_SEG that\n        // contains their control slot.  HWP's vertical_offset is relative to that\n        // anchor line, not always to the paragraph's first line.\n        let shape_para_y = if !common.treat_as_char\n            && matches!(common.vert_rel_to, crate::model::shape::VertRelTo::Para)\n            && para.line_segs.len() > 1\n        {\n            let text_len = para.text.chars().count();\n            let control_pos = para\n                .control_text_positions()\n                .get(control_index)\n                .copied()\n                .unwrap_or(text_len);\n            let utf16_pos = if control_pos < para.char_offsets.len() {\n                para.char_offsets[control_pos]\n            } else {\n                u32::MAX\n            };\n            let anchor_seg = if control_pos >= text_len {\n                para.line_segs.last()\n            } else {\n                para.line_segs\n                    .iter()\n                    .rev()\n                    .find(|seg| seg.text_start <= utf16_pos)\n            };\n            para_y + anchor_seg\n                .map(|seg| hwpunit_to_px(seg.vertical_pos, self.dpi))\n                .unwrap_or(0.0)\n        } else {\n            para_y\n        };\n\n        // 통합 좌표 계산 (layout_body_picture와 동일 로직)\n        let shape_container = LayoutRect {\n            x: col_area.x + para_margin_left,\n            y: shape_para_y,\n            width: col_area.width - para_margin_left - para_margin_right,\n            height: col_area.height - (shape_para_y - col_area.y).max(0.0),\n        };\n'''
+          if old not in s:
+              raise SystemExit('shape_container block not found')
+          s=s.replace(old,new,1)
+          old_call='''                paper_area,\n                para_y,\n                alignment,\n            )\n'''
+          new_call='''                paper_area,\n                shape_para_y,\n                alignment,\n            )\n'''
+          if old_call not in s:
+              raise SystemExit('compute_object_position para_y call not found')
+          p.write_text(s.replace(old_call,new_call,1),encoding='utf-8')
           PY
           cd rhwp-src
           cargo build --release --bin rhwp
