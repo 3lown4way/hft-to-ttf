@@ -8,7 +8,7 @@ Principles:
 
 The KICE09 charPr->composite-family bridge is still document-scoped because the
 runtime TTFs are composite faces reconstructed from the source document's seven
-script fontRefs.  Numbering and measurement fixes below are intentionally
+script fontRefs. Numbering and measurement fixes below are intentionally
 generic and derive their values from the HWP model / generated font metrics.
 """
 from pathlib import Path
@@ -26,14 +26,14 @@ def main() -> None:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else "rhwp-src")
 
     # 1) KICE09 charPr -> reconstructed composite TTF family bridge.
-    # This only chooses which source-derived composite face to use.  Glyph
+    # This only chooses which source-derived composite face to use. Glyph
     # geometry/advance remain those encoded in the generated TTF itself.
     p = root / "src/renderer/style_resolver.rs"
     old = '''fn resolve_char_styles(doc_info: &DocInfo, dpi: f64) -> Vec<ResolvedCharStyle> {\n    doc_info\n        .char_shapes\n        .iter()\n        .map(|cs| resolve_single_char_style(cs, doc_info, dpi))\n        .collect()\n}\n'''
     new = '''fn kice09_composite_family(char_pr_id: usize) -> Option<&'static str> {\n    match char_pr_id {\n        0 | 68 => Some("한양중고딕"),\n        1 | 19 | 20 => Some("신명 디나루"),\n        2 | 25 => Some("신명 중고딕"),\n        5 | 11 | 17 | 42 | 49 | 59 | 63 | 72 | 82 | 84 | 85 => Some("신명 중명조 - 한양영문"),\n        6 | 93 => Some("신명 중명조"),\n        7 | 8 | 9 | 12 | 13 | 14 | 15 | 23 | 24 | 29 | 32 | 33 | 34 | 47 | 56 | 60 | 61 | 64 | 65 | 67 | 70 | 71 | 74 | 75 | 76 | 77 | 78 | 79 | 80 | 81 | 83 | 86 | 88 | 89 | 90 | 91 | 92 | 94 | 95 | 99 | 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 => Some("신명 중명조 - 한양문자"),\n        16 | 73 | 87 => Some("신명 태고딕"),\n        10 | 18 => Some("한양견명조"),\n        21 | 48 | 54 | 55 => Some("신명 견명조"),\n        22 => Some("#태고딕"),\n        46 | 51 | 52 | 53 | 57 | 58 => Some("신명 신그래픽"),\n        50 => Some("신명 궁서"),\n        96 | 97 | 98 => Some("신명 중고딕 - 혼합"),\n        _ => None,\n    }\n}\n\nfn resolve_char_styles(doc_info: &DocInfo, dpi: f64) -> Vec<ResolvedCharStyle> {\n    doc_info\n        .char_shapes\n        .iter()\n        .enumerate()\n        .map(|(char_pr_id, cs)| {\n            let mut style = resolve_single_char_style(cs, doc_info, dpi);\n            if doc_info.char_shapes.len() == 108 {\n                if let Some(family) = kice09_composite_family(char_pr_id) {\n                    style.font_family = family.to_string();\n                    style.font_families = vec![family.to_string(); LANG_COUNT];\n                }\n            }\n            style\n        })\n        .collect()\n}\n'''
     replace_once(p, old, new, "font family bridge")
 
-    # 2) Decoration width: trim only actual trailing whitespace.  This is a
+    # 2) Decoration width: trim only actual trailing whitespace. This is a
     # renderer bugfix independent of the KICE font family.
     p = root / "src/renderer/svg.rs"
     old = '''        // 밑줄 처리\n        if !matches!(style.underline, UnderlineType::None) {\n            let text_width = *char_positions.last().unwrap_or(&0.0);\n'''
@@ -61,7 +61,23 @@ def main() -> None:
     new = '''fn numbering_marker_text_style(\n    styles: &ResolvedStyleSet,\n    para: Option<&Paragraph>,\n    first_run: Option<&ComposedTextRun>,\n) -> TextStyle {\n    if let Some(para) = para {\n        if let Some(ps) = styles.para_styles.get(para.para_shape_id as usize) {\n            if matches!(ps.head_type, HeadType::Number | HeadType::Outline)\n                && ps.numbering_id > 0\n            {\n                let numbering_index = (ps.numbering_id - 1) as usize;\n                if let Some(numbering) = styles.numberings.get(numbering_index) {\n                    let level = (ps.para_level as usize).min(6);\n                    let char_shape_id = numbering.heads[level].char_shape_id;\n                    if (char_shape_id as usize) < styles.char_styles.len() {\n                        return resolved_to_text_style(styles, char_shape_id, 0);\n                    }\n                }\n            }\n        }\n    }\n    if let Some(run) = first_run {\n        resolved_to_text_style(styles, run.char_style_id, run.lang_index)\n    } else {\n        paragraph_active_text_style(styles, para, 0).0\n    }\n}\n'''
     replace_once(p, old, new, "numbering head charPr")
 
-    # Deliberately NO U+3010/U+3011 advance override here.  The smoke build
+    # 5) rhwp v0.8.4 currently ships a text-measurement consumer written for
+    # MetricMatch { metric, bold_fallback }, while its own font-metric-gen emits
+    # find_metric() -> &FontMetric. The generated DB is our HFT-derived source of
+    # truth, so adapt the consumer to that generator API rather than fabricating
+    # a document-specific metric wrapper. This changes no glyph width values.
+    p = root / "src/renderer/layout/text_measurement.rs"
+    s = p.read_text(encoding="utf-8")
+    if "mm.metric" not in s:
+        raise SystemExit("font metric API adapter: expected mm.metric uses not found")
+    s = s.replace("mm.metric.em_size", "mm.em_size")
+    s = s.replace("mm.metric.get_width", "mm.get_width")
+    s = s.replace("is_monospace_metric(mm.metric)", "is_monospace_metric(mm)")
+    if "mm.metric" in s:
+        raise SystemExit("font metric API adapter: unhandled mm.metric use remains")
+    p.write_text(s, encoding="utf-8")
+
+    # Deliberately NO U+3010/U+3011 advance override here. The smoke build
     # injects the runtime TTF hmtx data into rhwp's generated font metrics DB,
     # so 【】/～/quotes are measured from the source-derived font itself.
 
