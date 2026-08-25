@@ -55,6 +55,30 @@ jobs:
             objdump -d -C --no-show-raw-insn --disassemble="$sym" "$BIN" >> "$OUT" 2>&1 || true
             echo >> "$OUT"
           done
+
+          echo '=== C++ FONT GUIDE WIDTH WRAPPERS ===' >> "$OUT"
+          for sym in \
+            _ZN13CHncFontGuide12GetFontWidthEwPK10tag_HFTDES \
+            _ZN13CHncFontGuide13_GetFontWidthEwiiPi \
+            _ZN13CHncFontGuide15HFTGetCharWidthEPKw10HNCLANGDEFjiiii \
+            _ZN13CHncFontGuide18HncGetHFTCharWidthEPKw10HNCLANGDEFji; do
+            echo "--- $sym ---" >> "$OUT"
+            objdump -d -C --no-show-raw-insn --disassemble="$sym" "$BIN" >> "$OUT" 2>&1 || true
+          done
+          echo >> "$OUT"
+
+          # GetFontWidth calls two internal helpers at 0x179a170 and 0x179a400.
+          # Dump a narrow range only, enough to reconstruct the width-source decision.
+          echo '=== INTERNAL WIDTH HELPER RANGE 0x179A100..0x179A4C0 ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn \
+            --start-address=0x179a100 --stop-address=0x179a4c0 "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
+
+          # GetFontWidth/GetFontEMSize index small selector tables here.
+          echo '=== FONT SELECTOR DATA 0x2B74680..0x2B74720 ===' >> "$OUT"
+          objdump -s --start-address=0x2b74680 --stop-address=0x2b74720 "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
+
           echo '=== CALL SITES REFERENCING WIDTH SYMBOLS ===' >> "$OUT"
           objdump -d -C --no-show-raw-insn "$BIN" 2>/dev/null \
             | grep -E -B 8 -A 14 'call.*<(HFTGetCharWidth|HncGetHFTCharWidth|GetFontWidth|GetFontEMSize)>' \
