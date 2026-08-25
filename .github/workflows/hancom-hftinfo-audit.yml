@@ -1,0 +1,112 @@
+name: Hancom HFT metadata audit
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/hancom-hftinfo-audit.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/hancom-hftinfo-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download official Hancom Linux viewer package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 \
+            -H 'Referer: https://www.hancom.com/' \
+            -A 'Mozilla/5.0' \
+            'https://cdn.hancom.com/pds/hnc/VIE/hancomoffice-hwpviewer-Ubuntu-amd64.deb' \
+            -o hancom-viewer.deb
+          ls -lh hancom-viewer.deb
+
+      - name: Extract only metadata diagnostics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir deb
+          cd deb
+          ar x ../hancom-viewer.deb
+          tar -xf data.tar.*
+          cd ..
+          find deb -type f \( -iname 'HFTInfo.dat' -o -iname 'FontInfo.dat' -o -iname 'FontList.lst' \) -print | sort | tee hancom-metadata-paths.txt
+          test -s hancom-metadata-paths.txt
+
+      - name: Analyze HFTInfo/FontInfo without publishing proprietary files
+        shell: bash
+        run: |
+          python - <<'PY' | tee hancom-hftinfo-audit.txt
+          from pathlib import Path
+          import re, struct, hashlib
+
+          files=[]
+          for p in Path('deb').rglob('*'):
+              if p.is_file() and p.name.lower() in {'hftinfo.dat','fontinfo.dat','fontlist.lst'}:
+                  files.append(p)
+          for p in sorted(files):
+              b=p.read_bytes()
+              print(f'FILE {p} size={len(b)} sha256={hashlib.sha256(b).hexdigest()}')
+              print(' head=',b[:64].hex(' '))
+              for enc in ('ascii','cp949','utf-16le'):
+                  try:
+                      t=b.decode(enc,errors='ignore')
+                  except Exception:
+                      continue
+                  hits=[]
+                  for needle in ('SPSMJ','SPJGT','TETGRSP','한양신명조','신명 태그래픽','신명 태고딕'):
+                      i=t.upper().find(needle.upper()) if needle.isascii() else t.find(needle)
+                      if i>=0: hits.append((needle,i,t[max(0,i-80):i+160].replace('\x00','·').replace('\r','\\r').replace('\n','\\n')))
+                  if hits:
+                      print(' decoded',enc)
+                      for h in hits: print('  HIT',repr(h))
+              print()
+
+          target_names=[b'SPSMJ.HFT',b'SPSMJ',b'SPJGT.HFT',b'TETGRSP.HFT',b'TETGTSP.HFT']
+          for p in sorted(files):
+              if p.name.lower()!='hftinfo.dat': continue
+              b=p.read_bytes()
+              print('=== TARGET BYTE WINDOWS',p,'===')
+              for needle in target_names:
+                  start=0
+                  while True:
+                      i=b.upper().find(needle.upper(),start)
+                      if i<0: break
+                      lo=max(0,i-160); hi=min(len(b),i+320); win=b[lo:hi]
+                      print(f'NEEDLE {needle!r} at 0x{i:X}, window 0x{lo:X}-0x{hi:X}')
+                      for o in range(0,len(win),16):
+                          row=win[o:o+16]
+                          asc=''.join(chr(x) if 32<=x<127 else '.' for x in row)
+                          print(f'{lo+o:08X}  {row.hex(" "):<47}  {asc}')
+                      # numeric clues around occurrence
+                      vals16=[]; vals32=[]
+                      for off in range(max(0,i-128),min(len(b)-1,i+256),2):
+                          v=struct.unpack_from('<H',b,off)[0]
+                          if v in (200,230,384,400,441,1000): vals16.append((off,v))
+                      for off in range(max(0,i-128),min(len(b)-3,i+256),4):
+                          v=struct.unpack_from('<I',b,off)[0]
+                          if v in (200,230,384,400,441,1000): vals32.append((off,v))
+                      print(' nearby_u16_targets',vals16)
+                      print(' nearby_u32_targets',vals32)
+                      start=i+1
+              print()
+          PY
+
+      - name: Upload diagnostics only
+        uses: actions/upload-artifact@v7
+        with:
+          name: hancom-hftinfo-audit
+          path: |
+            hancom-metadata-paths.txt
+            hancom-hftinfo-audit.txt
+          if-no-files-found: error
