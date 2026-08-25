@@ -1,0 +1,73 @@
+name: Hancom HFT char width disassembly
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/hancom-hft-charwidth-disasm.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/hancom-hft-charwidth-disasm.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download and extract official viewer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 \
+            -H 'Referer: https://www.hancom.com/' \
+            -A 'Mozilla/5.0' \
+            'https://cdn.hancom.com/pds/hnc/VIE/hancomoffice-hwpviewer-Ubuntu-amd64.deb' \
+            -o hancom-viewer.deb
+          mkdir deb
+          cd deb
+          ar x ../hancom-viewer.deb
+          tar -xf data.tar.*
+          cd ..
+          test -x deb/usr/bin/hwpviewer
+
+      - name: Disassemble HFT width path
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=deb/usr/bin/hwpviewer
+          OUT=hancom-hft-charwidth-disasm.txt
+          : > "$OUT"
+          echo '=== ELF ===' >> "$OUT"
+          file "$BIN" >> "$OUT"
+          readelf -h "$BIN" | grep -E 'Type:|Machine:|Entry point' >> "$OUT"
+          echo >> "$OUT"
+          echo '=== TARGET SYMBOLS ===' >> "$OUT"
+          readelf -Ws "$BIN" | grep -E 'HFTGetCharWidth|HncGetHFTCharWidth|GetFontWidth|GetFontEMSize|HncDRGetHFTTypeInfo|HFTGetGlyphOutline|HncGetHFTFontStyles|GetGlyphIndex\(' >> "$OUT" || true
+          echo >> "$OUT"
+          for sym in HFTGetCharWidth HncGetHFTCharWidth GetFontWidth GetFontEMSize HncDRGetHFTTypeInfo HFTGetGlyphOutline HncGetHFTFontStyles; do
+            echo "=== DISASSEMBLY $sym ===" >> "$OUT"
+            objdump -d -C --no-show-raw-insn --disassemble="$sym" "$BIN" >> "$OUT" 2>&1 || true
+            echo >> "$OUT"
+          done
+          echo '=== CALL SITES REFERENCING WIDTH SYMBOLS ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn "$BIN" 2>/dev/null \
+            | grep -E -B 8 -A 14 'call.*<(HFTGetCharWidth|HncGetHFTCharWidth|GetFontWidth|GetFontEMSize)>' \
+            | head -n 1000 >> "$OUT" || true
+          echo >> "$OUT"
+          echo '=== NEARBY EXPORTED HFT/FONT FUNCTIONS ===' >> "$OUT"
+          nm -D -C "$BIN" 2>/dev/null \
+            | grep -E ' (HFT|HncGetHFT|HncDRGetHFT|GetFont(Width|EMSize|FamilyCategory)|GetGlyphIndex\(|GetBmBitmap\(|GetOlBitmap\()' \
+            | sort >> "$OUT" || true
+          cat "$OUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hancom-hft-charwidth-disasm
+          path: hancom-hft-charwidth-disasm.txt
+          if-no-files-found: error
