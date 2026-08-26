@@ -31,7 +31,7 @@ jobs:
           cd ..
           test -x deb/usr/bin/hwpviewer
 
-      - name: Trace glyph index metadata path
+      - name: Trace section loader and glyph flags
         shell: bash
         run: |
           set -euo pipefail
@@ -47,25 +47,25 @@ jobs:
           }
 
           echo '=== TARGET SYMBOLS ===' >> "$OUT"
-          readelf -Ws "$BIN" | grep -E 'GetGlyphIndex|GetOutlineData|GetOlBitmap|GetFontOutlineData|HFTGetGlyphOutline|HncGetFontOutline' >> "$OUT" || true
+          readelf -Ws "$BIN" | grep -E 'OpenFontFile|GetGlyphIndexExt|GetOutlineData|GetFontOutlineData' >> "$OUT" || true
           echo >> "$OUT"
 
-          # Static HFT glyph-index resolver. This is the remaining source of the
-          # per-glyph flags/offset records consumed by GetOutlineData.
+          # OpenFontFile+0x130 lazily expands each 24-byte serialized section into
+          # 48-byte sub-descriptors. These fields decide whether glyph records carry
+          # an 8-byte per-glyph rect or use the descriptor-level default rect.
+          dump 'OpenFontFile section expansion 0x17a1620..0x17a1cd0' 0x17a1620 0x17a1cd0
+
+          # Resolver and consumer kept adjacent so flags/offset arrays can be mapped.
           dump 'GetGlyphIndexExt 0x17a2460..0x17a2a60' 0x17a2460 0x17a2a60
+          dump 'GetOutlineData 0x17a3870..0x17a3e30' 0x17a3870 0x17a3e30
 
-          # Exported/simpler sibling immediately following it for structure comparison.
-          dump 'GetGlyphIndex 0x17a2a60..0x17a2ac0' 0x17a2a60 0x17a2ac0
-
-          # Generic driver implementation of the same resolver.
-          dump 'CHncFontDriverGeneric::_GetGlyphIndexExt 0x180a4e0..0x180aae0' 0x180a4e0 0x180aae0
-
-          # Consumers: identify which returned pointer fields, flags and file offsets
-          # select the 8-byte record and component placement path.
-          dump 'GetOlBitmap/GetOutlineData caller window 0x17a3270..0x17a3e30' 0x17a3270 0x17a3e30
+          # Jump table used by low-nibble sub-descriptor type 0..4.
+          echo '=== GetGlyphIndexExt jump table bytes 0x2108890 ===' >> "$OUT"
+          objdump -s --start-address=0x2108890 --stop-address=0x21088b0 "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
 
           echo '=== DATAFLOW INDEX ===' >> "$OUT"
-          grep -n -E 'call.*17a2460|call.*180a4e0|0x8\(%rbp\)|0xa\(%rbp\)|0x14\(%rbp\)|0x10|0x20|_read|lseek|fseek|0x90\(%rsp\)|0xa0\(%rsp\)|0xb0\(%rsp\)|0xd0\(%rsp\)|0xd4\(%rsp\)' "$OUT" | head -n 1500 >> "$OUT.index" || true
+          grep -n -E '0x10\(%r14\)|0x10\(%rsi\)|0x10\(%rbp\)|0xa\(%rbp\)|0x14\(%rbp\)|0x18\(%rbp\)|0x20\(%rbp\)|0x30\(%rbx\)|_read|_lseek|malloc|0x10|0x20|17a2460|17a3ded' "$OUT" | head -n 2000 >> "$OUT.index" || true
           cat "$OUT.index" >> "$OUT" 2>/dev/null || true
 
           wc -l "$OUT"
