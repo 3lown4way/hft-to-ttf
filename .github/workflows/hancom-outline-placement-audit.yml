@@ -31,7 +31,7 @@ jobs:
           cd ..
           test -x deb/usr/bin/hwpviewer
 
-      - name: Trace HFT outline placement and scale operands
+      - name: Isolate outline fitting core
         shell: bash
         run: |
           set -euo pipefail
@@ -39,85 +39,46 @@ jobs:
           OUT=hancom-outline-placement-audit.txt
           : > "$OUT"
 
-          echo '=== TARGET SYMBOLS / ADDRESSES / SIZES ===' >> "$OUT"
-          readelf -Ws "$BIN" \
-            | grep -E 'HFTGetGlyphOutline|HncGetGlyphOutline|HncGetFontOutline|HspDcDrawCharWithHftOutline|GetOlBitmap|GetOutlineData|GetFontWidth|HFTGetCharWidth|HncGetHFTCharWidth|GetGlyphIndexExt|LoadTypefaceDes|GetFont@@| HncGetFontOutline' \
-            >> "$OUT" || true
+          dump() {
+            local title="$1" start="$2" stop="$3"
+            echo "=== $title ===" >> "$OUT"
+            objdump -d -C --no-show-raw-insn --start-address="$start" --stop-address="$stop" "$BIN" >> "$OUT" 2>&1 || true
+            echo >> "$OUT"
+          }
+
+          echo '=== TARGET SYMBOLS ===' >> "$OUT"
+          readelf -Ws "$BIN" | grep -E 'GetFontOutlineData|_HFTItemPlace|_HFTExportOutlineToEXT|_HFTDrawCharByOutline|_sHdcGetCharOutline|HFTGetGlyphOutline|HncGetFontOutline|GetOutlineData|GetFontWidth|GetFontEMSize' >> "$OUT" || true
           echo >> "$OUT"
 
-          echo '=== HncGetFontOutline full body / raw operands ===' >> "$OUT"
-          objdump -drwC --start-address=0x179c3d0 --stop-address=0x179c6e0 "$BIN" >> "$OUT" 2>&1 || true
-          echo >> "$OUT"
+          # Core point-scaling routine called after HFT outline program decoding.
+          dump 'GetFontOutlineData 0x17a6750..0x17a6d80' 0x17a6750 0x17a6d80
 
-          echo '=== HncGetFontOutline helper-call windows ===' >> "$OUT"
-          objdump -d -C --no-show-raw-insn --start-address=0x179c3d0 --stop-address=0x179c6e0 "$BIN" 2>/dev/null \
-            | grep -E -B 42 -A 72 '(call.*179a170|idiv|0x1c\(%rbp\)|0x18\(%rbp\))' \
-            >> "$OUT" || true
-          echo >> "$OUT"
+          # Layout width generation before outline export.
+          dump '_HFTItemPlace 0x17cb290..0x17cb6c0' 0x17cb290 0x17cb6c0
 
-          echo '=== Width resolver 0x179a100..0x179a360 ===' >> "$OUT"
-          objdump -drwC --start-address=0x179a100 --stop-address=0x179a360 "$BIN" >> "$OUT" 2>&1 || true
-          echo >> "$OUT"
+          # Outline export path; shows the exact EM/ratio operands passed to HFTGetGlyphOutline/GetFontWidth.
+          dump '_HFTExportOutlineToEXT 0x17cb8b0..0x17cbdc0' 0x17cb8b0 0x17cbdc0
 
-          echo '=== GetFont full body 0x179bd10..0x179c3d0 ===' >> "$OUT"
-          objdump -drwC --start-address=0x179bd10 --stop-address=0x179c3d0 "$BIN" >> "$OUT" 2>&1 || true
-          echo >> "$OUT"
+          # Normal draw path; compare its outline operands with export/PDF-like path.
+          dump '_HFTDrawCharByOutline 0x17cc2f0..0x17cc540' 0x17cc2f0 0x17cc540
+          dump '_sHdcGetCharOutline 0x17dbd60..0x17dc150' 0x17dbd60 0x17dc150
 
-          echo '=== GetFont width-resolver dataflow windows ===' >> "$OUT"
-          objdump -d -C --no-show-raw-insn --start-address=0x179bd10 --stop-address=0x179c3d0 "$BIN" 2>/dev/null \
-            | grep -E -B 42 -A 70 '(call.*179a170|idiv|0x1c\(%r12\)|0x18\(%r12\))' \
-            >> "$OUT" || true
-          echo >> "$OUT"
+          # Higher-level font-guide wrappers used by legacy HFT output code.
+          dump 'CHncFontGuide::HncGetFontOutline 0x17eea70..0x17eed10' 0x17eea70 0x17eed10
+          dump 'CHncFontGuide::HFTGetGlyphOutline 0x17f0970..0x17f0a40' 0x17f0970 0x17f0a40
+          dump 'CHncFontGuide::HFTGetCharWidth 0x17f0a40..0x17f0b00' 0x17f0a40 0x17f0b00
 
-          echo '=== GetFontWidth exact region ===' >> "$OUT"
-          objdump -drwC --start-address=0x179ad30 --stop-address=0x179af40 "$BIN" >> "$OUT" 2>&1 || true
-          echo >> "$OUT"
+          # Keep the already-proven fallback-width normalization formula nearby for comparison.
+          dump 'HncGetFontOutline fit/fallback window 0x179c4d0..0x179c5a0' 0x179c4d0 0x179c5a0
+          dump 'GetFontWidth core 0x179adc0..0x179af30' 0x179adc0 0x179af30
 
-          echo '=== LoadTypefaceDes full body / descriptor construction ===' >> "$OUT"
-          objdump -drwC --start-address=0x17a1cd0 --stop-address=0x17a2160 "$BIN" >> "$OUT" 2>&1 || true
-          echo >> "$OUT"
+          # Compact operand index: no full-binary call-site dump.
+          echo '=== OPERAND/CALL INDEX ===' >> "$OUT"
+          grep -n -E 'GetFontOutlineData|HFTGetGlyphOutline|HFTGetCharWidth|HncGetFontOutline|GetFontWidth|GetFontEMSize|HncIntMulDiv|imul|idiv|0x1c\(|0x18\(' "$OUT" | head -n 800 >> "$OUT.index" || true
+          cat "$OUT.index" >> "$OUT" 2>/dev/null || true
 
-          echo '=== LoadTypefaceDes header 0x180..0x1ae and descriptor +0x18/+0x1c windows ===' >> "$OUT"
-          objdump -d -C --no-show-raw-insn --start-address=0x17a1cd0 --stop-address=0x17a2160 "$BIN" 2>/dev/null \
-            | grep -E -B 20 -A 30 '(0x1(80|82|84|86|88|8a|8c|8e|90|92|94|96|98|9a|9c|9e|a0|a2|a4|a6|a8|aa|ac|ae)\(%r13\)|0x(18|1c)\(%rbx\))' \
-            >> "$OUT" || true
-          echo >> "$OUT"
-
-          echo '=== GetOlBitmap full body ===' >> "$OUT"
-          objdump -drwC --start-address=0x17a3270 --stop-address=0x17a3870 "$BIN" >> "$OUT" 2>&1 || true
-          echo >> "$OUT"
-
-          echo '=== GetOutlineData full body ===' >> "$OUT"
-          objdump -drwC --start-address=0x17a3870 --stop-address=0x17a3e30 "$BIN" >> "$OUT" 2>&1 || true
-          echo >> "$OUT"
-
-          echo '=== Outline metadata / 8-byte bbox-offset record windows ===' >> "$OUT"
-          objdump -d -C --no-show-raw-insn --start-address=0x17a3270 --stop-address=0x17a3e30 "$BIN" 2>/dev/null \
-            | grep -E -B 36 -A 54 '(_read|0x54\(%rsp\)|0x56\(%rsp\)|0x58\(%rsp\)|0x5a\(%rsp\)|ZZAddRect)' \
-            >> "$OUT" || true
-          echo >> "$OUT"
-
-          echo '=== HFT wrapper / exported outline path ===' >> "$OUT"
-          objdump -drwC --start-address=0x17dc160 --stop-address=0x17dc3d0 "$BIN" >> "$OUT" 2>&1 || true
-          echo >> "$OUT"
-
-          echo '=== HspDcDrawCharWithHftOutline ===' >> "$OUT"
-          objdump -drwC --start-address=0x1faf000 --stop-address=0x1faf300 "$BIN" >> "$OUT" 2>&1 || true
-          echo >> "$OUT"
-
-          echo '=== CALL SITES TO OUTLINE/WIDTH ENTRY POINTS ===' >> "$OUT"
-          objdump -d -C --no-show-raw-insn "$BIN" 2>/dev/null \
-            | grep -E -B 24 -A 40 '(call|jmp).*(179c3d0|179a170|17dc1b0|17dc280|17dc350|17dc380|1faf0d0|17a3270|17a3870)' \
-            | head -n 9000 >> "$OUT" || true
-          echo >> "$OUT"
-
-          echo '=== HFT DRAW PATH SYMBOL NEIGHBORS ===' >> "$OUT"
-          nm -D -C "$BIN" 2>/dev/null \
-            | grep -E 'HFT|Hft|Outline|Glyph|CharWidth|DrawChar|TypefaceDes|GetFont' \
-            | sort >> "$OUT" || true
-          echo >> "$OUT"
-
-          cat "$OUT"
+          wc -l "$OUT"
+          tail -n 40 "$OUT"
 
       - uses: actions/upload-artifact@v7
         with:
