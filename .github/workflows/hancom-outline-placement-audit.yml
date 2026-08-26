@@ -31,7 +31,7 @@ jobs:
           cd ..
           test -x deb/usr/bin/hwpviewer
 
-      - name: Trace PDF HFT outline export path
+      - name: Trace g_pTextOutPdf registration and callback owner
         shell: bash
         run: |
           set -euo pipefail
@@ -39,24 +39,28 @@ jobs:
           OUT=hancom-outline-placement-audit.txt
           : > "$OUT"
 
-          echo '=== TARGET SYMBOLS / SIZE ===' >> "$OUT"
-          readelf -Ws "$BIN" | grep -E '_HFTExportOutlineToPDF|_HFTExportOutlineToEXT|HFTGetGlyphOutline|HFTGetCharWidth|GetFontWidth|GetFontEMSize' >> "$OUT" || true
+          echo '=== PDF CALLBACK GLOBAL ===' >> "$OUT"
+          nm -D -C "$BIN" | grep -E 'g_pTextOutPdf|TextOut.*Pdf|TextOut.*PDF|Pdf.*TextOut|PDF.*TextOut' >> "$OUT" || true
           echo >> "$OUT"
 
-          echo '=== ORDERED SYMBOLS 0x17cc000..0x17ce800 ===' >> "$OUT"
-          nm -n -C "$BIN" | awk '$1 >= "00000000017cc000" && $1 <= "00000000017ce800"' >> "$OUT" || true
+          echo '=== ALL XREFS TO g_pTextOutPdf (0x2c7fed0) ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn "$BIN" 2>/dev/null \
+            | grep -n -B 36 -A 52 '2c7fed0 <g_pTextOutPdf' \
+            | head -n 5000 >> "$OUT" || true
           echo >> "$OUT"
 
-          echo '=== _HFTExportOutlineToPDF 0x17cd0a0..0x17ce800 ===' >> "$OUT"
-          objdump -drwC --start-address=0x17cd0a0 --stop-address=0x17ce800 "$BIN" >> "$OUT" 2>&1 || true
+          echo '=== LIKELY REGISTRATION SYMBOLS ===' >> "$OUT"
+          nm -D -C "$BIN" 2>/dev/null \
+            | grep -Ei 'Set.*(PDF|Pdf|TextOut)|Register.*(PDF|Pdf|TextOut)|Callback.*(PDF|Pdf|TextOut)|PrintPdf|HwpPrintPdf|PdfExport' \
+            | head -n 1500 >> "$OUT" || true
           echo >> "$OUT"
 
-          echo '=== PDF EXPORT OPERAND INDEX ===' >> "$OUT"
-          grep -n -E 'HFTGetGlyphOutline|HFTGetCharWidth|GetFontWidth|GetFontEMSize|HncIntMulDiv|imul|idiv|sar|shr|shl|0x64|0x3e8|1000|100|call.*17dc1b0|call.*17dc280|call.*179ad30|call.*179b0f0' "$OUT" | head -n 2500 >> "$OUT.index" || true
-          cat "$OUT.index" >> "$OUT" 2>/dev/null || true
+          echo '=== PDF EXPORT CALLER/FALLBACK WINDOW ===' >> "$OUT"
+          objdump -drwC --start-address=0x17ccc00 --stop-address=0x17cd5c0 "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
 
           wc -l "$OUT"
-          tail -n 100 "$OUT"
+          tail -n 120 "$OUT"
 
       - uses: actions/upload-artifact@v7
         with:
