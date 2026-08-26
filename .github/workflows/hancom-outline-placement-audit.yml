@@ -31,7 +31,7 @@ jobs:
           cd ..
           test -x deb/usr/bin/hwpviewer
 
-      - name: Trace section loader and glyph flags
+      - name: Trace PDF HFT outline export path
         shell: bash
         run: |
           set -euo pipefail
@@ -39,37 +39,24 @@ jobs:
           OUT=hancom-outline-placement-audit.txt
           : > "$OUT"
 
-          dump() {
-            local title="$1" start="$2" stop="$3"
-            echo "=== $title ===" >> "$OUT"
-            objdump -drwC --start-address="$start" --stop-address="$stop" "$BIN" >> "$OUT" 2>&1 || true
-            echo >> "$OUT"
-          }
-
-          echo '=== TARGET SYMBOLS ===' >> "$OUT"
-          readelf -Ws "$BIN" | grep -E 'OpenFontFile|GetGlyphIndexExt|GetOutlineData|GetFontOutlineData' >> "$OUT" || true
+          echo '=== TARGET SYMBOLS / SIZE ===' >> "$OUT"
+          readelf -Ws "$BIN" | grep -E '_HFTExportOutlineToPDF|_HFTExportOutlineToEXT|HFTGetGlyphOutline|HFTGetCharWidth|GetFontWidth|GetFontEMSize' >> "$OUT" || true
           echo >> "$OUT"
 
-          # OpenFontFile+0x130 lazily expands each 24-byte serialized section into
-          # 48-byte sub-descriptors. These fields decide whether glyph records carry
-          # an 8-byte per-glyph rect or use the descriptor-level default rect.
-          dump 'OpenFontFile section expansion 0x17a1620..0x17a1cd0' 0x17a1620 0x17a1cd0
-
-          # Resolver and consumer kept adjacent so flags/offset arrays can be mapped.
-          dump 'GetGlyphIndexExt 0x17a2460..0x17a2a60' 0x17a2460 0x17a2a60
-          dump 'GetOutlineData 0x17a3870..0x17a3e30' 0x17a3870 0x17a3e30
-
-          # Jump table used by low-nibble sub-descriptor type 0..4.
-          echo '=== GetGlyphIndexExt jump table bytes 0x2108890 ===' >> "$OUT"
-          objdump -s --start-address=0x2108890 --stop-address=0x21088b0 "$BIN" >> "$OUT" 2>&1 || true
+          echo '=== ORDERED SYMBOLS 0x17cc000..0x17ce800 ===' >> "$OUT"
+          nm -n -C "$BIN" | awk '$1 >= "00000000017cc000" && $1 <= "00000000017ce800"' >> "$OUT" || true
           echo >> "$OUT"
 
-          echo '=== DATAFLOW INDEX ===' >> "$OUT"
-          grep -n -E '0x10\(%r14\)|0x10\(%rsi\)|0x10\(%rbp\)|0xa\(%rbp\)|0x14\(%rbp\)|0x18\(%rbp\)|0x20\(%rbp\)|0x30\(%rbx\)|_read|_lseek|malloc|0x10|0x20|17a2460|17a3ded' "$OUT" | head -n 2000 >> "$OUT.index" || true
+          echo '=== _HFTExportOutlineToPDF 0x17cd0a0..0x17ce800 ===' >> "$OUT"
+          objdump -drwC --start-address=0x17cd0a0 --stop-address=0x17ce800 "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
+
+          echo '=== PDF EXPORT OPERAND INDEX ===' >> "$OUT"
+          grep -n -E 'HFTGetGlyphOutline|HFTGetCharWidth|GetFontWidth|GetFontEMSize|HncIntMulDiv|imul|idiv|sar|shr|shl|0x64|0x3e8|1000|100|call.*17dc1b0|call.*17dc280|call.*179ad30|call.*179b0f0' "$OUT" | head -n 2500 >> "$OUT.index" || true
           cat "$OUT.index" >> "$OUT" 2>/dev/null || true
 
           wc -l "$OUT"
-          tail -n 80 "$OUT"
+          tail -n 100 "$OUT"
 
       - uses: actions/upload-artifact@v7
         with:
