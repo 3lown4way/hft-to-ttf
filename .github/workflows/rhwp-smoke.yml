@@ -7,6 +7,7 @@ on:
       - '.github/workflows/rhwp-smoke.yml'
       - 'tools/patch_rhwp_hft_native.py'
       - 'tools/patch_rhwp_hft_synthetic_bold.py'
+      - 'tools/fix_hft_opening_quotes.py'
       - 'tools/audit_hft_source_truth.py'
       - 'tools/compare_pdf_punctuation_baselines.py'
       - 'tools/audit_punctuation_horizontal_semantics.py'
@@ -18,6 +19,7 @@ on:
       - '.github/workflows/rhwp-smoke.yml'
       - 'tools/patch_rhwp_hft_native.py'
       - 'tools/patch_rhwp_hft_synthetic_bold.py'
+      - 'tools/fix_hft_opening_quotes.py'
       - 'tools/audit_hft_source_truth.py'
       - 'tools/compare_pdf_punctuation_baselines.py'
       - 'tools/audit_punctuation_horizontal_semantics.py'
@@ -54,7 +56,7 @@ jobs:
           python -m pip install --quiet fonttools
           python tools/audit_hft_source_truth.py | tee hft-source-audit.txt
 
-      - name: Prepare runtime faces without PDF glyph repair
+      - name: Prepare runtime faces with HFT opening-quote placement fix
         shell: bash
         run: |
           set -euxo pipefail
@@ -77,6 +79,7 @@ jobs:
               f.save(out)
           print('runtime fonts', len(list(dst.glob('*.ttf'))))
           PY
+          python tools/fix_hft_opening_quotes.py runtime_fonts | tee opening-quote-fix.txt
           test ! -e runtime_fonts/.pdf-patched
 
       - name: Build rhwp metric generator and inject runtime TTF hmtx
@@ -254,6 +257,7 @@ jobs:
           path: |
             out/**
             hft-source-audit.txt
+            opening-quote-fix.txt
             runtime-font-metric-gen.txt
             svg-diagnostics.txt
             rhwp-capabilities.json
