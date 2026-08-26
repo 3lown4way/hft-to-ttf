@@ -1,0 +1,150 @@
+name: rhwp revised quote TTF regression
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/rhwp-quote-ttf-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download original 2009 June HWP and comparison oracle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://legendstudy.com/223' \
+            'https://t1.daumcdn.net/cfile/tistory/262D61365269C48115' -o input.hwp
+          echo '59af2533f5a12fee6685f9c9f3b8a646a54997badaba3c062138c7d04f5e6205  input.hwp' | sha256sum -c -
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://savetest.com/18' \
+            'https://t1.daumcdn.net/cfile/tistory/1542AA124CE785323E' -o oracle.pdf
+
+      - name: Prepare runtime TTFs with revised quote metrics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --quiet fonttools pymupdf
+          mkdir runtime_fonts
+          python - <<'PY'
+          from pathlib import Path
+          from fontTools.ttLib import TTFont
+          import shutil
+
+          targets = {
+              '신명 중명조',
+              '신명 중명조 - 한양영문',
+              '신명 중명조 - 한양문자',
+              '신명 중고딕 - 혼합',
+          }
+          widths = {'‘': 230, '’': 230, '“': 441, '”': 441}
+          changed = []
+          for i, p in enumerate(sorted(Path('output_ttf').glob('*.ttf')), 1):
+              out = Path('runtime_fonts') / p.name
+              shutil.copy2(p, out)
+              f = TTFont(out)
+              family = next((n.toUnicode() for n in f['name'].names if n.nameID == 1), '')
+              if family in targets:
+                  cmap = f.getBestCmap() or {}
+                  for ch, adv in widths.items():
+                      g = cmap.get(ord(ch))
+                      if not g:
+                          raise SystemExit(f'{family}: missing {ch}')
+                      old_adv, lsb = f['hmtx'].metrics[g]
+                      f['hmtx'].metrics[g] = (adv, lsb)
+                      print(f'QUOTE_METRIC family={family!r} ch={ch!r} old={old_adv} new={adv} lsb={lsb}')
+                  changed.append(family)
+              ps = f'KICE09QUOTE{i:02d}-Regular'
+              for n in f['name'].names:
+                  if n.nameID == 6:
+                      n.string = ps.encode('utf-16-be') if n.isUnicode() else ps.encode('latin1')
+              f.save(out)
+          print('CHANGED_FAMILIES', sorted(changed))
+          if set(changed) != targets:
+              raise SystemExit(f'wrong changed family set: {changed!r}')
+          PY
+
+      - name: Build rhwp v0.8.4 against revised metrics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
+          cd rhwp-src
+          cargo build --release --bin font-metric-gen
+          ./target/release/font-metric-gen --dir ../runtime_fonts --output src/renderer/font_metrics_data.rs
+          cd ..
+          python tools/patch_rhwp_hft_native.py rhwp-src
+          python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
+          sudo apt-get update
+          sudo apt-get install -y libfreetype6-dev libfontconfig1-dev poppler-utils
+          cd rhwp-src
+          cargo build --release --features native-skia --bin rhwp
+
+      - name: Render pages 1-5 with revised TTFs
+        shell: bash
+        env:
+          RHWP_FONT_PATH: ${{ github.workspace }}/runtime_fonts
+        run: |
+          set -euxo pipefail
+          RHWP='./rhwp-src/target/release/rhwp'
+          mkdir -p out/svg out/direct out/text
+          : > out/direct/direct-status.txt
+          for p in 0 1 2 3 4; do
+            n=$((p+1))
+            "$RHWP" export-svg input.hwp -p "$p" -o out/svg
+            "$RHWP" export-pdf input.hwp -p "$p" -o "out/page-${n}-embedded.pdf"
+            pdftotext -layout "out/page-${n}-embedded.pdf" "out/text/page-${n}.txt"
+            if "$RHWP" export-pdf input.hwp -p "$p" --backend direct --font-path "${{ github.workspace }}/runtime_fonts" -o "out/direct/page-${n}-embedded.pdf" 2>"out/direct/page-${n}-stderr.txt"; then
+              echo "page-${n} direct=success" | tee -a out/direct/direct-status.txt
+            else
+              status=$?
+              echo "page-${n} direct=failed:${status}" | tee -a out/direct/direct-status.txt
+            fi
+          done
+
+      - name: Audit horizontal punctuation semantics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python tools/audit_punctuation_horizontal_semantics.py \
+            --oracle oracle.pdf \
+            --generated-dir out \
+            --runtime-fonts runtime_fonts \
+            --pages 5 \
+            --out out/horizontal-audit.txt
+          cat out/horizontal-audit.txt
+
+      - name: Structural sanity checks
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python - <<'PY' | tee out/structural-sanity.txt
+          from pathlib import Path
+          import fitz
+          for p in range(1, 6):
+              f = Path(f'out/page-{p}-embedded.pdf')
+              d = fitz.open(f)
+              page = d[0]
+              text = page.get_text('text')
+              drawings = page.get_drawings()
+              print('PAGE', p, 'size', tuple(round(v, 2) for v in page.rect), 'chars', len(text), 'drawings', len(drawings), 'quotes', {q:text.count(q) for q in '‘’“”'})
+              if not text.strip():
+                  raise SystemExit(f'page {p}: no text')
+          PY
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: rhwp-revised-quote-ttf-pages
+          path: |
+            out/**
+            runtime_fonts/**
+          if-no-files-found: error
+          compression-level: 0
