@@ -31,7 +31,7 @@ jobs:
           cd ..
           test -x deb/usr/bin/hwpviewer
 
-      - name: Trace g_pTextOutPdf registration and callback owner
+      - name: Resolve PDF callback module and exported function names
         shell: bash
         run: |
           set -euo pipefail
@@ -39,28 +39,82 @@ jobs:
           OUT=hancom-outline-placement-audit.txt
           : > "$OUT"
 
-          echo '=== PDF CALLBACK GLOBAL ===' >> "$OUT"
-          nm -D -C "$BIN" | grep -E 'g_pTextOutPdf|TextOut.*Pdf|TextOut.*PDF|Pdf.*TextOut|PDF.*TextOut' >> "$OUT" || true
+          echo '=== CALLBACK REGISTRATION DISASSEMBLY ===' >> "$OUT"
+          objdump -drwC --start-address=0x17dc3b0 --stop-address=0x17dc690 "$BIN" >> "$OUT" 2>&1 || true
           echo >> "$OUT"
 
-          echo '=== ALL XREFS TO g_pTextOutPdf (0x2c7fed0) ===' >> "$OUT"
-          objdump -d -C --no-show-raw-insn "$BIN" 2>/dev/null \
-            | grep -n -B 36 -A 52 '2c7fed0 <g_pTextOutPdf' \
-            | head -n 5000 >> "$OUT" || true
+          echo '=== HFT PDF EXPORT DISASSEMBLY ===' >> "$OUT"
+          objdump -drwC --start-address=0x17cd0a0 --stop-address=0x17cd2a0 "$BIN" >> "$OUT" 2>&1 || true
           echo >> "$OUT"
 
-          echo '=== LIKELY REGISTRATION SYMBOLS ===' >> "$OUT"
-          nm -D -C "$BIN" 2>/dev/null \
-            | grep -Ei 'Set.*(PDF|Pdf|TextOut)|Register.*(PDF|Pdf|TextOut)|Callback.*(PDF|Pdf|TextOut)|PrintPdf|HwpPrintPdf|PdfExport' \
-            | head -n 1500 >> "$OUT" || true
+          echo '=== STRINGS REFERENCED BY CALLBACK REGISTRATION ===' >> "$OUT"
+          python -m pip install --quiet pyelftools
+          python - <<'PY' >> "$OUT"
+          from elftools.elf.elffile import ELFFile
+          from pathlib import Path
+
+          path=Path('deb/usr/bin/hwpviewer')
+          addresses=[
+              0x203991e,
+              0x2109f94,0x2109fae,0x2109fe8,0x210a008,
+              0x210a028,0x210a034,0x210a042,0x210a04c,
+          ]
+          with path.open('rb') as fh:
+              elf=ELFFile(fh)
+              segs=[s for s in elf.iter_segments() if s['p_type']=='PT_LOAD']
+              def raw_at(va,n=256):
+                  for s in segs:
+                      lo=int(s['p_vaddr']); hi=lo+int(s['p_filesz'])
+                      if lo <= va < hi:
+                          fh.seek(int(s['p_offset'])+(va-lo))
+                          return fh.read(min(n,hi-va))
+                  return b''
+              for va in addresses:
+                  raw=raw_at(va)
+                  asc=raw.split(b'\0',1)[0]
+                  # wchar strings in this Linux build are UTF-32LE; also print
+                  # UTF-16LE as a diagnostic in case a referenced buffer differs.
+                  vals=[]
+                  try: vals.append(('ascii',asc.decode('utf-8','replace')))
+                  except Exception: pass
+                  for enc,step in [('utf-32le',4),('utf-16le',2)]:
+                      end=0
+                      while end+step <= len(raw) and any(raw[end:end+step]):
+                          end += step
+                      try: vals.append((enc,raw[:end].decode(enc,'replace')))
+                      except Exception: pass
+                  print(hex(va), 'raw=', raw[:96].hex(' '))
+                  for enc,val in vals:
+                      print(' ',enc,repr(val))
+          PY
           echo >> "$OUT"
 
-          echo '=== PDF EXPORT CALLER/FALLBACK WINDOW ===' >> "$OUT"
-          objdump -drwC --start-address=0x17ccc00 --stop-address=0x17cd5c0 "$BIN" >> "$OUT" 2>&1 || true
+          echo '=== CANDIDATE PDF/PRINT SHARED LIBRARIES IN PACKAGE ===' >> "$OUT"
+          find deb -type f \( -name '*.so' -o -name '*.so.*' \) -print | sort >> "$OUT"
+          echo >> "$OUT"
+
+          echo '=== EXPORTED PDF/TEXTOUT SYMBOLS IN PACKAGE SHARED LIBRARIES ===' >> "$OUT"
+          while IFS= read -r so; do
+            hits=$(nm -D -C --defined-only "$so" 2>/dev/null | grep -Ei 'StartDoc|EndDoc|TextOut|PDF|Pdf|HFT' | head -n 250 || true)
+            if [ -n "$hits" ]; then
+              echo "--- $so ---" >> "$OUT"
+              printf '%s\n' "$hits" >> "$OUT"
+            fi
+          done < <(find deb -type f \( -name '*.so' -o -name '*.so.*' \) -print | sort)
+          echo >> "$OUT"
+
+          echo '=== CALLBACK-RELATED STRING OCCURRENCES IN PACKAGE FILES ===' >> "$OUT"
+          for f in $(find deb -type f -size +20k -size -80M | head -n 1000); do
+            hits=$(strings -a "$f" 2>/dev/null | grep -E '^(StartDoc|EndDoc|TextOutPdf|TextOutPDF|Hnc.*Pdf|Hnc.*PDF|.*TextOut.*Pdf.*)$' | head -n 100 || true)
+            if [ -n "$hits" ]; then
+              echo "--- $f ---" >> "$OUT"
+              printf '%s\n' "$hits" >> "$OUT"
+            fi
+          done
           echo >> "$OUT"
 
           wc -l "$OUT"
-          tail -n 120 "$OUT"
+          tail -n 180 "$OUT"
 
       - uses: actions/upload-artifact@v7
         with:
