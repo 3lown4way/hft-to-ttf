@@ -1,0 +1,199 @@
+name: T5 width semantics audit
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/t5-width-semantics-audit.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/t5-width-semantics-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download oracle PDF
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://savetest.com/18' \
+            'https://t1.daumcdn.net/cfile/tistory/1542AA124CE785323E' \
+            -o original-2009-june-language.pdf
+
+      - name: Audit all T5 widths against HFT sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --quiet fonttools pymupdf
+          python - <<'PY' | tee t5-width-semantics-audit.txt
+          import re
+          import sys
+          import tempfile
+          import unicodedata
+          import zipfile
+          from pathlib import Path
+
+          import pymupdf as fitz
+          from fontTools.pens.boundsPen import BoundsPen
+
+          ROOT = Path('.')
+          sys.path.insert(0, str(ROOT / 'converter' / 'KICE09_HFT_converter_v3_4'))
+          from hft_core_v34 import (  # noqa: E402
+              _char_for_record,
+              _draw_ops,
+              iter_raw_records,
+              iter_unicode_glyphs,
+              read_meta,
+          )
+
+          doc = fitz.open('original-2009-june-language.pdf')
+          fx = None
+          for pno in range(doc.page_count):
+              for f in doc[pno].get_fonts(full=True):
+                  if f[2] == 'Type3' and (str(f[3]) == 'T5' or str(f[4]) == 'T5'):
+                      fx = f[0]
+                      break
+              if fx is not None:
+                  break
+          if fx is None:
+              raise SystemExit('T5 missing')
+
+          def ref(key):
+              kind, val = doc.xref_get_key(fx, key)
+              if kind != 'xref':
+                  raise RuntimeError((key, kind, val))
+              return int(val.split()[0])
+
+          first = int(doc.xref_get_key(fx, 'FirstChar')[1])
+          last = int(doc.xref_get_key(fx, 'LastChar')[1])
+          widths = [float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?', doc.xref_object(ref('Widths'), compressed=False))]
+          tu = doc.xref_stream(ref('ToUnicode')).decode('latin1', 'replace')
+          pairs = [(int(a, 16), int(b, 16)) for a, b in re.findall(r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>', tu)]
+          code_to_unicode = {}
+          for src, dst in pairs:
+              if first <= src <= last:
+                  code_to_unicode[src] = dst
+
+          print('=== T5 OBJECT ===')
+          print('xref', fx, 'first', first, 'last', last, 'width_count', len(widths), 'unicode_pairs', len(code_to_unicode))
+          print('width_classes_all', sorted(set(widths)))
+
+          print('\n=== T5 FULL UNICODE WIDTH MAP ===')
+          print('pdf_code,U+,char,width,category,eaw,name')
+          for code in range(first, last + 1):
+              idx = code - first
+              if idx >= len(widths):
+                  continue
+              cp = code_to_unicode.get(code)
+              if cp is None:
+                  continue
+              try:
+                  ch = chr(cp)
+                  name = unicodedata.name(ch, '')
+                  cat = unicodedata.category(ch)
+                  eaw = unicodedata.east_asian_width(ch)
+              except ValueError:
+                  ch = ''
+                  name = ''
+                  cat = ''
+                  eaw = ''
+              print(f'0x{code:02X},U+{cp:04X},{ch!r},{widths[idx]:.1f},{cat},{eaw},{name}')
+
+          with tempfile.TemporaryDirectory() as td_raw:
+              td = Path(td_raw)
+              with zipfile.ZipFile(ROOT / 'inputs' / 'kice09-required48.zip') as zf:
+                  names = set(zf.namelist())
+                  wanted = ['ENSMJ.HFT', 'SPSMJ.HFT', 'SPJGT.HFT', 'HCSPTGT.HFT', 'HCSPSGRP.HFT', 'HCSPGS.HFT', 'HCSPDNR.HFT', 'TEGMJSP.HFT', 'TETGRSP.HFT']
+                  for name in wanted:
+                      if name in names:
+                          zf.extract(name, td)
+
+              en = {item.char: item.advance for item in iter_unicode_glyphs(td / 'ENSMJ.HFT')}
+              print('\n=== T5 ASCII vs ENSMJ.HFT ADVANCE ===')
+              print('char,pdf_code,t5_width,ensmj_advance,delta')
+              ascii_rows = []
+              for code, cp in sorted(code_to_unicode.items()):
+                  if not (0x20 <= cp <= 0x7E):
+                      continue
+                  ch = chr(cp)
+                  idx = code - first
+                  if idx >= len(widths) or ch not in en:
+                      continue
+                  row = (ch, code, widths[idx], en[ch], widths[idx] - en[ch])
+                  ascii_rows.append(row)
+                  print(f'{ch!r},0x{code:02X},{widths[idx]:.1f},{en[ch]},{widths[idx]-en[ch]:+.1f}')
+              exact = sum(1 for _ch, _code, w, a, _d in ascii_rows if abs(w-a) < 0.01)
+              print('ascii_joined', len(ascii_rows), 'exact_width_matches', exact)
+
+              def source_bounds(path):
+                  meta = read_meta(path)
+                  out = {}
+                  for idx, code, adv, ops, enc in iter_raw_records(path):
+                      ch = _char_for_record(meta, idx, code)
+                      if not ch:
+                          continue
+                      pen = BoundsPen(None)
+                      _draw_ops(ops, pen, 0.0)
+                      if pen.bounds:
+                          x0, y0, x1, y1 = pen.bounds
+                          out[ch] = (code, adv, float(x0), float(x1), float(y0), float(y1), enc)
+                  return out
+
+              sp = source_bounds(td / 'SPSMJ.HFT')
+              print('\n=== ALL T5 CHARACTERS THAT MAP TO SPSMJ.HFT ===')
+              print('char,U+,hnc,pdf_code,t5_width,src_adv,src_xmin,src_xmax,src_ink_w,left_space,right_edge')
+              joined = []
+              for code, cp in sorted(code_to_unicode.items()):
+                  try:
+                      ch = chr(cp)
+                  except ValueError:
+                      continue
+                  if ch not in sp:
+                      continue
+                  idx = code - first
+                  if idx >= len(widths):
+                      continue
+                  hnc, adv, x0, x1, y0, y1, enc = sp[ch]
+                  joined.append((ch, cp, hnc, code, widths[idx], adv, x0, x1))
+                  print(f'{ch!r},U+{cp:04X},0x{hnc:04X},0x{code:02X},{widths[idx]:.1f},{adv},{x0:.1f},{x1:.1f},{x1-x0:.1f},{x0:.1f},{1000-x1:.1f}')
+              print('spsmj_joined', len(joined), 'official_width_classes', sorted({r[4] for r in joined}))
+
+              targets = '·…‘’“”～【】'
+              print('\n=== TARGET SYMBOL SOURCE METRICS ACROSS AVAILABLE SP HFTS ===')
+              print('font,char,U+,hnc,src_adv,xmin,xmax,ink_w,ymin,ymax,encryption')
+              for name in wanted[1:]:
+                  path = td / name
+                  if not path.exists():
+                      continue
+                  src = source_bounds(path)
+                  for ch in targets:
+                      if ch not in src:
+                          continue
+                      hnc, adv, x0, x1, y0, y1, enc = src[ch]
+                      print(f'{name},{ch!r},U+{ord(ch):04X},0x{hnc:04X},{adv},{x0:.1f},{x1:.1f},{x1-x0:.1f},{y0:.1f},{y1:.1f},{enc}')
+
+              print('\n=== SMART QUOTE WIDTH RELATIONS ===')
+              equiv = {'‘': "'", '’': "'", '“': '"', '”': '"'}
+              for q, ascii_ch in equiv.items():
+                  rows = [(code, widths[code-first]) for code, cp in code_to_unicode.items() if cp == ord(q) and 0 <= code-first < len(widths)]
+                  if not rows:
+                      continue
+                  code, w = rows[0]
+                  print(f'{q!r}: t5={w:.1f}; ENSMJ {ascii_ch!r}={en.get(ascii_ch)}; delta={w-en.get(ascii_ch, 0):+.1f}')
+
+          doc.close()
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: t5-width-semantics-audit
+          path: t5-width-semantics-audit.txt
+          if-no-files-found: error
