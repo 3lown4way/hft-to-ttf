@@ -1,0 +1,87 @@
+name: Hancom HFT outline placement audit
+
+on:
+  push:
+    paths:
+      - '.github/workflows/hancom-outline-placement-audit.yml'
+  pull_request:
+    paths:
+      - '.github/workflows/hancom-outline-placement-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download and extract official viewer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -H 'Referer: https://www.hancom.com/' -A 'Mozilla/5.0' \
+            'https://cdn.hancom.com/pds/hnc/VIE/hancomoffice-hwpviewer-Ubuntu-amd64.deb' -o hancom-viewer.deb
+          mkdir deb
+          cd deb
+          ar x ../hancom-viewer.deb
+          tar -xf data.tar.*
+          cd ..
+          test -x deb/usr/bin/hwpviewer
+
+      - name: Trace HFT outline placement and scale path
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=deb/usr/bin/hwpviewer
+          OUT=hancom-outline-placement-audit.txt
+          : > "$OUT"
+
+          echo '=== TARGET SYMBOLS / SIZES ===' >> "$OUT"
+          readelf -Ws "$BIN" | grep -E 'HFTGetGlyphOutline|HncGetGlyphOutline|HncGetFontOutline|HspDcDrawCharWithHftOutline|GetOlBitmap|GetOutlineData|GetFontWidth|HFTGetCharWidth|HncGetHFTCharWidth|GetGlyphIndexExt' >> "$OUT" || true
+          echo >> "$OUT"
+
+          echo '=== HncGetFontOutline exact ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn --disassemble='HncGetFontOutline' "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
+
+          echo '=== HFT width/outline wrappers 0x17dc160..0x17dc3d0 ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn --start-address=0x17dc160 --stop-address=0x17dc3d0 "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
+
+          echo '=== HspDcDrawCharWithHftOutline 0x1faf000..0x1faf300 ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn --start-address=0x1faf000 --stop-address=0x1faf300 "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
+
+          echo '=== GetOlBitmap 0x17a3270..0x17a3870 ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn --start-address=0x17a3270 --stop-address=0x17a3870 "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
+
+          echo '=== GetOutlineData 0x17a3870..0x17a3e30 ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn --start-address=0x17a3870 --stop-address=0x17a3e30 "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
+
+          echo '=== GetFontWidth 0x179ad30..0x179af40 ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn --start-address=0x179ad30 --stop-address=0x179af40 "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
+
+          echo '=== CALL SITES TO OUTLINE/WIDTH ENTRY POINTS ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn "$BIN" 2>/dev/null \
+            | grep -E -B 18 -A 28 '(call|jmp).*(179c3d0|17dc1b0|17dc280|17dc350|17dc380|1faf0d0|17a3870)' \
+            | head -n 5000 >> "$OUT" || true
+          echo >> "$OUT"
+
+          echo '=== HFT DRAW PATH SYMBOL NEIGHBORS ===' >> "$OUT"
+          nm -D -C "$BIN" 2>/dev/null \
+            | grep -E 'HFT|Hft|Outline|Glyph|CharWidth|DrawChar' \
+            | sort >> "$OUT" || true
+          echo >> "$OUT"
+
+          cat "$OUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hancom-outline-placement-audit
+          path: hancom-outline-placement-audit.txt
+          if-no-files-found: error
