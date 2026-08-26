@@ -9,6 +9,7 @@ on:
       - 'tools/patch_rhwp_hft_synthetic_bold.py'
       - 'tools/audit_hft_source_truth.py'
       - 'tools/compare_pdf_punctuation_baselines.py'
+      - 'tools/audit_punctuation_horizontal_semantics.py'
       - 'converter/KICE09_HFT_converter_v3_4/**'
       - 'output_ttf/**'
   pull_request:
@@ -19,6 +20,7 @@ on:
       - 'tools/patch_rhwp_hft_synthetic_bold.py'
       - 'tools/audit_hft_source_truth.py'
       - 'tools/compare_pdf_punctuation_baselines.py'
+      - 'tools/audit_punctuation_horizontal_semantics.py'
       - 'converter/KICE09_HFT_converter_v3_4/**'
       - 'output_ttf/**'
 
@@ -158,6 +160,30 @@ jobs:
           else
             echo 'No direct PDF pages were generated.' | tee out/direct/baseline-audit-console.txt
           fi
+
+      - name: Compare compatibility PDF punctuation X semantics against source HFT TTF
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python tools/audit_punctuation_horizontal_semantics.py \
+            --oracle original-2009-june-language.pdf \
+            --generated-dir out \
+            --runtime-fonts runtime_fonts \
+            --pages 5 \
+            | tee out/horizontal-audit-console.txt
+
+      - name: Compare direct Skia PDF punctuation X semantics against source HFT TTF
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python tools/audit_punctuation_horizontal_semantics.py \
+            --oracle original-2009-june-language.pdf \
+            --generated-dir out/direct \
+            --runtime-fonts runtime_fonts \
+            --pages 5 \
+            | tee out/direct/horizontal-audit-console.txt
 
       - name: Collect non-blocking SVG diagnostics
         if: always()
