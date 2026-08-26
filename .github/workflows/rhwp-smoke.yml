@@ -7,24 +7,22 @@ on:
       - '.github/workflows/rhwp-smoke.yml'
       - 'tools/patch_rhwp_hft_native.py'
       - 'tools/patch_rhwp_hft_synthetic_bold.py'
-      - 'tools/fix_hft_opening_quotes.py'
       - 'tools/audit_hft_source_truth.py'
       - 'tools/compare_pdf_punctuation_baselines.py'
       - 'tools/audit_punctuation_horizontal_semantics.py'
       - 'converter/KICE09_HFT_converter_v3_4/**'
-      - 'output_ttf/**'
+      - 'inputs/kice09-required48.zip'
   pull_request:
     branches: [main, rhwp-ci-base]
     paths:
       - '.github/workflows/rhwp-smoke.yml'
       - 'tools/patch_rhwp_hft_native.py'
       - 'tools/patch_rhwp_hft_synthetic_bold.py'
-      - 'tools/fix_hft_opening_quotes.py'
       - 'tools/audit_hft_source_truth.py'
       - 'tools/compare_pdf_punctuation_baselines.py'
       - 'tools/audit_punctuation_horizontal_semantics.py'
       - 'converter/KICE09_HFT_converter_v3_4/**'
-      - 'output_ttf/**'
+      - 'inputs/kice09-required48.zip'
 
 permissions:
   contents: read
@@ -56,17 +54,29 @@ jobs:
           python -m pip install --quiet fonttools
           python tools/audit_hft_source_truth.py | tee hft-source-audit.txt
 
-      - name: Prepare runtime faces with HFT opening-quote placement fix
+      - name: Rebuild all runtime faces from source HFT
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p runtime_fonts
+          rm -rf fresh_ttf runtime_fonts
+          mkdir -p fresh_ttf runtime_fonts
+          : > fresh-build.log
+          for combo in $(seq 1 13); do
+            python converter/KICE09_HFT_converter_v3_4/build_one_combo_ci.py \
+              inputs/kice09-required48.zip \
+              converter/KICE09_HFT_converter_v3_4/analysis_v34/KICE09_fontref_combinations_v34.csv \
+              --combo "$combo" \
+              --outdir fresh_ttf \
+              | tee -a fresh-build.log
+          done
+          test "$(find fresh_ttf -maxdepth 1 -name '*.ttf' | wc -l)" -eq 13
+
           python - <<'PY'
           from fontTools.ttLib import TTFont
           from pathlib import Path
           import shutil
 
-          src=Path('output_ttf')
+          src=Path('fresh_ttf')
           dst=Path('runtime_fonts')
           for i,p in enumerate(sorted(src.glob('*.ttf')),1):
               out=dst/p.name
@@ -77,10 +87,42 @@ jobs:
                   if n.nameID == 6:
                       n.string = ps.encode('utf-16-be') if n.isUnicode() else ps.encode('latin1')
               f.save(out)
-          print('runtime fonts', len(list(dst.glob('*.ttf'))))
+          print('fresh runtime fonts', len(list(dst.glob('*.ttf'))))
           PY
-          python tools/fix_hft_opening_quotes.py runtime_fonts | tee opening-quote-fix.txt
           test ! -e runtime_fonts/.pdf-patched
+
+      - name: Verify integrated source-derived quote placement
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python - <<'PY' | tee integrated-quote-placement.txt
+          from fontTools.ttLib import TTFont
+          from pathlib import Path
+
+          checked=0
+          for p in sorted(Path('runtime_fonts').glob('*.ttf')):
+              f=TTFont(p)
+              cmap=f.getBestCmap() or {}
+              glyf=f['glyf']
+              metrics=f['hmtx'].metrics
+              for oc, cc in ((0x2018,0x2019),(0x201C,0x201D)):
+                  on=cmap.get(oc); cn=cmap.get(cc)
+                  if not on or not cn: continue
+                  og=glyf[on]; cg=glyf[cn]
+                  og.recalcBounds(glyf); cg.recalcBounds(glyf)
+                  oa, olsb=metrics[on]
+                  ca, clsb=metrics[cn]
+                  # Integrated build must preserve source advances.  Placement is
+                  # represented by outline/LSB translation, not PDF-derived hmtx.
+                  print(p.name, chr(oc), 'x', og.xMin, og.xMax, 'adv', oa, 'lsb', olsb,
+                        '|', chr(cc), 'x', cg.xMin, cg.xMax, 'adv', ca, 'lsb', clsb)
+                  if og.xMin > cg.xMax + 100:
+                      raise SystemExit(f'{p.name}: opener remains on far-right source-cell placement')
+                  checked += 1
+          if checked == 0:
+              raise SystemExit('no smart-quote pairs found in rebuilt fonts')
+          print('OK paired quote placement samples', checked)
+          PY
 
       - name: Build rhwp metric generator and inject runtime TTF hmtx
         shell: bash
@@ -110,7 +152,7 @@ jobs:
           cargo build --release --features native-skia --bin rhwp
           ./target/release/rhwp capabilities > ../rhwp-capabilities.json
 
-      - name: Render untouched HWP with HFT-derived faces
+      - name: Render untouched HWP with freshly rebuilt HFT-derived faces
         shell: bash
         env:
           RHWP_FONT_PATH: ${{ github.workspace }}/runtime_fonts
@@ -227,8 +269,6 @@ jobs:
         run: |
           set -euxo pipefail
           grep -R -F 'stroke-width="0.16"' out/svg/input_002.svg
-          # Career-table heading brackets are legacy HFT Bold.  They must use
-          # Regular-face fill+stroke rather than browser/CSS synthetic bold.
           python - <<'PY'
           import re, html
           from pathlib import Path
@@ -256,8 +296,11 @@ jobs:
           name: rhwp-kice09-hft-native-pages
           path: |
             out/**
+            fresh_ttf/*.ttf
+            fresh_ttf/*_manifest.json
             hft-source-audit.txt
-            opening-quote-fix.txt
+            fresh-build.log
+            integrated-quote-placement.txt
             runtime-font-metric-gen.txt
             svg-diagnostics.txt
             rhwp-capabilities.json
