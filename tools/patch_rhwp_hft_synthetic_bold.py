@@ -9,10 +9,12 @@ thin same-colour stroke at paint time, instead of selecting/synthesising a
 separate bold outline.
 
 Legacy HFT glyphs also use a substantial descent area below the baseline. rhwp
-v0.8.4 places every bottom underline at a fixed baseline+2 SVG px, which can
-make the 1 px rule touch HFT glyph ink.  For HFT-derived runtime faces, keep the
-same underline style/thickness but place the rule at 0.20em below the baseline.
-This is proportional to the legacy HFT cell rather than page- or glyph-specific.
+v0.8.4 places every bottom underline at a fixed baseline+2 SVG px and paints the
+ordinary solid decoration with a fixed 1 px rule.  That combination makes the
+rule look both too close and too heavy at normal KICE body sizes.  For
+HFT-derived runtime faces, use a proportional baseline clearance and a
+font-size-relative thin solid rule.  The rule is still derived from the text
+style; there is no page, character, or coordinate special case.
 
 The runtime families below are composites reconstructed solely from the source
 HFT fontRefs.  0.16 SVG px corresponds to the legacy PDF's 1-unit text stroke
@@ -68,7 +70,7 @@ def main() -> None:
     # Family provenance helper.  These are the source-HFT composite faces made
     # by this repository, not arbitrary system fonts with similar names.
     anchor = '''const TEXT_MARK_CLIP_RIGHT_PAD: f64 = 48.0;\n'''
-    helper = '''const TEXT_MARK_CLIP_RIGHT_PAD: f64 = 48.0;\n\n/// Legacy Hancom HFT-derived runtime faces.  Their HWP bold flag is rendered\n/// by painting the Regular outline with fill+stroke; metrics remain Regular.\nfn is_legacy_hft_runtime_family(name: &str) -> bool {\n''' + RUNTIME_FAMILY_MATCH + '''\n}\n\nconst LEGACY_HFT_BOLD_STROKE_PX: f64 = 0.16;\n/// HFT cells reserve a descent zone below the baseline.  A fixed +2px rule can\n/// touch that ink at normal exam body sizes, so keep proportional clearance.\nconst LEGACY_HFT_UNDERLINE_OFFSET_EM: f64 = 0.20;\n'''
+    helper = '''const TEXT_MARK_CLIP_RIGHT_PAD: f64 = 48.0;\n\n/// Legacy Hancom HFT-derived runtime faces.  Their HWP bold flag is rendered\n/// by painting the Regular outline with fill+stroke; metrics remain Regular.\nfn is_legacy_hft_runtime_family(name: &str) -> bool {\n''' + RUNTIME_FAMILY_MATCH + '''\n}\n\nconst LEGACY_HFT_BOLD_STROKE_PX: f64 = 0.16;\n/// HFT cells reserve a descent zone below the baseline.  A fixed +2px rule can\n/// touch that ink at normal exam body sizes, so keep proportional clearance.\nconst LEGACY_HFT_UNDERLINE_OFFSET_EM: f64 = 0.20;\n/// Hancom's ordinary HFT underline is visibly finer than rhwp's generic 1px\n/// decoration.  Scale with the active font size and clamp only for raster\n/// stability at very small/large sizes.\nconst LEGACY_HFT_UNDERLINE_STROKE_EM: f64 = 0.035;\n'''
     replace_once(p, anchor, helper, "legacy HFT family helper")
 
     # Do not ask the embedder for a separate Bold face for these families.
@@ -93,12 +95,17 @@ def main() -> None:
     new = '''            let ul_y = match style.underline {\n                UnderlineType::Top => y - font_size + 1.0,\n                _ if is_legacy_hft_runtime_family(&style.font_family) => {\n                    y + font_size * LEGACY_HFT_UNDERLINE_OFFSET_EM\n                }\n                _ => y + 2.0,\n            };\n'''
     replace_all_exact(p, old, new, 2, "legacy HFT SVG underline clearance")
 
+    # The generic decoration helper paints SOLID with a fixed 1px stroke.  Do
+    # not change that helper globally because strikethrough and non-HFT text use
+    # it too.  Override only the ordinary SOLID underline for source-HFT faces.
+    old = '''            self.draw_line_shape(\n                x,\n                ul_y,\n                x + text_width,\n                ul_y,\n                &ul_color,\n                style.underline_shape,\n            );\n'''
+    new = '''            if style.underline_shape == 0\n                && is_legacy_hft_runtime_family(&style.font_family)\n            {\n                let ul_stroke = (font_size * LEGACY_HFT_UNDERLINE_STROKE_EM)\n                    .clamp(0.45, 0.65);\n                self.output.push_str(&format!(\n                    "<line x1=\\\"{}\\\" y1=\\\"{}\\\" x2=\\\"{}\\\" y2=\\\"{}\\\" stroke=\\\"{}\\\" stroke-width=\\\"{:.3}\\\"/>\\n",\n                    x, ul_y, x + text_width, ul_y, ul_color, ul_stroke\n                ));\n            } else {\n                self.draw_line_shape(\n                    x,\n                    ul_y,\n                    x + text_width,\n                    ul_y,\n                    &ul_color,\n                    style.underline_shape,\n                );\n            }\n'''
+    replace_all_exact(p, old, new, 2, "legacy HFT SVG underline weight")
+
     # DirectLayer custom-font loading: on Linux Skia may decode a Korean
     # Typeface::family_name() as question marks even though the TTF's Unicode
     # name table is correct.  Keep Skia's own key, but additionally alias the
     # same Typeface by all Unicode FAMILY records parsed from the TTF bytes.
-    # This keeps --font-path resolution generic and preserves the font's cmap,
-    # outlines, and hmtx untouched.
     p = root / "src/renderer/skia/renderer.rs"
     old = '''                    if let Ok(data) = std::fs::read(&path) {\n                        let skia_data = skia_safe::Data::new_copy(&data);\n                        if let Some(typeface) = font_mgr.new_from_data(&skia_data, None) {\n                            let family = typeface.family_name();\n                            into.entry(family).or_insert(typeface);\n                        }\n                    }\n'''
     new = '''                    if let Ok(data) = std::fs::read(&path) {\n                        let mut unicode_family_aliases = Vec::<String>::new();\n                        if let Ok(face) = ttf_parser::Face::parse(&data, 0) {\n                            for name in face.names() {\n                                if name.name_id == ttf_parser::name_id::FAMILY {\n                                    if let Some(value) = name.to_string() {\n                                        let value = value.trim();\n                                        if !value.is_empty()\n                                            && !unicode_family_aliases.iter().any(|v| v == value)\n                                        {\n                                            unicode_family_aliases.push(value.to_string());\n                                        }\n                                    }\n                                }\n                            }\n                        }\n                        let skia_data = skia_safe::Data::new_copy(&data);\n                        if let Some(typeface) = font_mgr.new_from_data(&skia_data, None) {\n                            let family = typeface.family_name();\n                            into.entry(family).or_insert_with(|| typeface.clone());\n                            for alias in unicode_family_aliases {\n                                into.entry(alias).or_insert_with(|| typeface.clone());\n                            }\n                        }\n                    }\n'''
@@ -111,20 +118,25 @@ def main() -> None:
     p = root / "src/renderer/skia/text_replay.rs"
 
     # Direct Skia has its own underline paint path; apply the same HFT-only
-    # proportional placement there so Direct and Compatibility stay aligned.
+    # proportional placement and thin SOLID stroke there so Direct and
+    # Compatibility stay aligned.
     anchor = '''use super::renderer::colorref_to_skia;\n\n'''
-    helper = '''use super::renderer::colorref_to_skia;\n\nfn is_legacy_hft_runtime_family(name: &str) -> bool {\n''' + RUNTIME_FAMILY_MATCH + '''\n}\n\nconst LEGACY_HFT_UNDERLINE_OFFSET_EM: f32 = 0.20;\n\n'''
+    helper = '''use super::renderer::colorref_to_skia;\n\nfn is_legacy_hft_runtime_family(name: &str) -> bool {\n''' + RUNTIME_FAMILY_MATCH + '''\n}\n\nconst LEGACY_HFT_UNDERLINE_OFFSET_EM: f32 = 0.20;\nconst LEGACY_HFT_UNDERLINE_STROKE_EM: f32 = 0.035;\n\n'''
     replace_once(p, anchor, helper, "direct legacy HFT underline helper")
 
     old = '''                    let line_y = match style.underline {\n                        UnderlineType::Top => y as f32 - font_size + 1.0,\n                        _ => y as f32 + 2.0,\n                    };\n'''
     new = '''                    let line_y = match style.underline {\n                        UnderlineType::Top => y as f32 - font_size + 1.0,\n                        _ if is_legacy_hft_runtime_family(&style.font_family) => {\n                            y as f32 + font_size * LEGACY_HFT_UNDERLINE_OFFSET_EM\n                        }\n                        _ => y as f32 + 2.0,\n                    };\n'''
     replace_all_exact(p, old, new, 2, "direct legacy HFT underline clearance")
 
+    old = '''                    draw_line_shape(\n                        bbox.x as f32,\n                        line_y,\n                        bbox.x as f32 + text_width,\n                        color,\n                        style.underline_shape,\n                    );\n'''
+    new = '''                    if style.underline_shape == 0\n                        && is_legacy_hft_runtime_family(&style.font_family)\n                    {\n                        let ul_stroke = (font_size * LEGACY_HFT_UNDERLINE_STROKE_EM)\n                            .clamp(0.45, 0.65);\n                        draw_styled_line(\n                            bbox.x as f32,\n                            line_y,\n                            bbox.x as f32 + text_width,\n                            color,\n                            ul_stroke,\n                            &[],\n                            false,\n                        );\n                    } else {\n                        draw_line_shape(\n                            bbox.x as f32,\n                            line_y,\n                            bbox.x as f32 + text_width,\n                            color,\n                            style.underline_shape,\n                        );\n                    }\n'''
+    replace_all_exact(p, old, new, 2, "direct legacy HFT underline weight")
+
     old = '''                let primary_typeface = typeface_chain.first().cloned();\n'''
-    new = '''                let primary_typeface = typeface_chain.first().cloned();\n                if text.contains('‘') || text.contains('’') || text.contains('신') {\n                    let hft_debug_chain: Vec<String> =\n                        typeface_chain.iter().map(|tf| tf.family_name()).collect();\n                    let hft_debug_sample: String = text.chars().take(48).collect();\n                    eprintln!(\n                        "RHWP_DIRECT_TEXT family={:?} custom_exact={} chain={:?} text={:?}",\n                        style.font_family,\n                        self.custom_typefaces.contains_key(style.font_family.as_str()),\n                        hft_debug_chain,\n                        hft_debug_sample\n                    );\n                }\n'''
+    new = '''                let primary_typeface = typeface_chain.first().cloned();\n                if text.contains('‘') || text.contains('’') || text.contains('신') || text.contains('㉡') {\n                    let hft_debug_chain: Vec<String> =\n                        typeface_chain.iter().map(|tf| tf.family_name()).collect();\n                    let hft_debug_sample: String = text.chars().take(48).collect();\n                    eprintln!(\n                        "RHWP_DIRECT_TEXT family={:?} custom_exact={} chain={:?} text={:?}",\n                        style.font_family,\n                        self.custom_typefaces.contains_key(style.font_family.as_str()),\n                        hft_debug_chain,\n                        hft_debug_sample\n                    );\n                }\n'''
     replace_once(p, old, new, "direct requested font trace")
 
-    print("patched rhwp legacy HFT bold + underline clearance + Unicode TTF family aliases + direct font trace")
+    print("patched rhwp legacy HFT bold + underline clearance/weight + Unicode TTF family aliases + direct font trace")
 
 
 if __name__ == "__main__":
