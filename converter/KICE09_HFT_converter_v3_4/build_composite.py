@@ -10,6 +10,86 @@ from fontTools.pens.ttGlyphPen import TTGlyphPen
 from hft_core_v34 import TARGET_UPEM, iter_unicode_glyphs
 
 
+# Hancom legacy symbol HFTs author paired smart quotation marks in the same
+# nominal symbol cell: the opening member is stored on the far/right side of
+# that cell and the closing member on the far/left side.  A modern TTF renderer
+# does not replay that legacy pair-placement convention, so the opening outline
+# can start inside the following character cell even though the HWP layout
+# advance itself is correct.
+#
+# Reconstruct the pair placement from the HFT-derived outlines themselves:
+# translate only the opening member so that its outline center matches its
+# closing partner.  The source outline shape and source advance are preserved;
+# no PDF/oracle width, per-font offset, or page-specific coordinate is used.
+HFT_PAIRED_SMART_QUOTES = (
+    (0x2018, 0x2019),  # ‘ ’
+    (0x201C, 0x201D),  # “ ”
+)
+
+
+def _simple_glyph_x_bounds(glyph):
+    try:
+        coords, _end_pts, _flags = glyph.getCoordinates(None)
+    except Exception:
+        return None
+    if not coords:
+        return None
+    xs = [pt[0] for pt in coords]
+    return min(xs), max(xs), coords
+
+
+def _restore_hft_paired_quote_placement(glyphs, metrics, cmap, source_log):
+    """Replay the legacy HFT placement convention for paired smart quotes.
+
+    This is deliberately geometry-derived.  It does not change advances and it
+    only acts when the opening member is actually to the right of its closing
+    partner, which is the legacy HFT pattern recovered from the source fonts.
+    """
+    changes = []
+    for opener_cp, closer_cp in HFT_PAIRED_SMART_QUOTES:
+        opener_name = cmap.get(opener_cp)
+        closer_name = cmap.get(closer_cp)
+        if not opener_name or not closer_name:
+            continue
+
+        opener = glyphs.get(opener_name)
+        closer = glyphs.get(closer_name)
+        if opener is None or closer is None:
+            continue
+        if getattr(opener, "isComposite", lambda: False)() or getattr(closer, "isComposite", lambda: False)():
+            continue
+
+        ob = _simple_glyph_x_bounds(opener)
+        cb = _simple_glyph_x_bounds(closer)
+        if ob is None or cb is None:
+            continue
+        ox0, ox1, ocoords = ob
+        cx0, cx1, _ = cb
+        dx = int(round(((cx0 + cx1) - (ox0 + ox1)) / 2.0))
+
+        # An HFT opening member authored on the right side must move left.  If
+        # it does not have that pattern, leave the font untouched.
+        if dx >= 0:
+            continue
+
+        for i, (x, y) in enumerate(ocoords):
+            ocoords[i] = (x + dx, y)
+        opener.coordinates = ocoords
+
+        adv, lsb = metrics[opener_name]
+        metrics[opener_name] = (adv, lsb + dx)
+        changes.append({
+            "opener": f"U+{opener_cp:04X}",
+            "closer": f"U+{closer_cp:04X}",
+            "dx": dx,
+            "before": (ox0, ox1),
+            "after": (ox0 + dx, ox1 + dx),
+            "advance": adv,
+            "source": source_log.get(opener_cp),
+        })
+    return changes
+
+
 def build(
     sources,
     out: Path,
@@ -82,6 +162,18 @@ def build(
             cmap[cp] = name
             order.append(name)
             source_log[cp] = f"{label}:{path.name}:HNC0x{item.internal_code:04X}:{item.encryption}"
+
+    quote_changes = _restore_hft_paired_quote_placement(glyphs, metrics, cmap, source_log)
+    for change in quote_changes:
+        print(
+            "HFT paired quote placement:",
+            change["opener"],
+            f"dx={change['dx']:+d}",
+            f"x={change['before'][0]}..{change['before'][1]}",
+            f"->{change['after'][0]}..{change['after'][1]}",
+            f"advance={change['advance']}",
+            change["source"],
+        )
 
     fb = FontBuilder(TARGET_UPEM, isTTF=True)
     fb.setupGlyphOrder(order)
