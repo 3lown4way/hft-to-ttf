@@ -31,7 +31,7 @@ jobs:
           cd ..
           test -x deb/usr/bin/hwpviewer
 
-      - name: Isolate outline fitting core
+      - name: Trace glyph index metadata path
         shell: bash
         run: |
           set -euo pipefail
@@ -42,43 +42,34 @@ jobs:
           dump() {
             local title="$1" start="$2" stop="$3"
             echo "=== $title ===" >> "$OUT"
-            objdump -d -C --no-show-raw-insn --start-address="$start" --stop-address="$stop" "$BIN" >> "$OUT" 2>&1 || true
+            objdump -drwC --start-address="$start" --stop-address="$stop" "$BIN" >> "$OUT" 2>&1 || true
             echo >> "$OUT"
           }
 
           echo '=== TARGET SYMBOLS ===' >> "$OUT"
-          readelf -Ws "$BIN" | grep -E 'GetFontOutlineData|_HFTItemPlace|_HFTExportOutlineToEXT|_HFTDrawCharByOutline|_sHdcGetCharOutline|HFTGetGlyphOutline|HncGetFontOutline|GetOutlineData|GetFontWidth|GetFontEMSize' >> "$OUT" || true
+          readelf -Ws "$BIN" | grep -E 'GetGlyphIndex|GetOutlineData|GetOlBitmap|GetFontOutlineData|HFTGetGlyphOutline|HncGetFontOutline' >> "$OUT" || true
           echo >> "$OUT"
 
-          # Core point-scaling routine called after HFT outline program decoding.
-          dump 'GetFontOutlineData 0x17a6750..0x17a6d80' 0x17a6750 0x17a6d80
+          # Static HFT glyph-index resolver. This is the remaining source of the
+          # per-glyph flags/offset records consumed by GetOutlineData.
+          dump 'GetGlyphIndexExt 0x17a2460..0x17a2a60' 0x17a2460 0x17a2a60
 
-          # Layout width generation before outline export.
-          dump '_HFTItemPlace 0x17cb290..0x17cb6c0' 0x17cb290 0x17cb6c0
+          # Exported/simpler sibling immediately following it for structure comparison.
+          dump 'GetGlyphIndex 0x17a2a60..0x17a2ac0' 0x17a2a60 0x17a2ac0
 
-          # Outline export path; shows the exact EM/ratio operands passed to HFTGetGlyphOutline/GetFontWidth.
-          dump '_HFTExportOutlineToEXT 0x17cb8b0..0x17cbdc0' 0x17cb8b0 0x17cbdc0
+          # Generic driver implementation of the same resolver.
+          dump 'CHncFontDriverGeneric::_GetGlyphIndexExt 0x180a4e0..0x180aae0' 0x180a4e0 0x180aae0
 
-          # Normal draw path; compare its outline operands with export/PDF-like path.
-          dump '_HFTDrawCharByOutline 0x17cc2f0..0x17cc540' 0x17cc2f0 0x17cc540
-          dump '_sHdcGetCharOutline 0x17dbd60..0x17dc150' 0x17dbd60 0x17dc150
+          # Consumers: identify which returned pointer fields, flags and file offsets
+          # select the 8-byte record and component placement path.
+          dump 'GetOlBitmap/GetOutlineData caller window 0x17a3270..0x17a3e30' 0x17a3270 0x17a3e30
 
-          # Higher-level font-guide wrappers used by legacy HFT output code.
-          dump 'CHncFontGuide::HncGetFontOutline 0x17eea70..0x17eed10' 0x17eea70 0x17eed10
-          dump 'CHncFontGuide::HFTGetGlyphOutline 0x17f0970..0x17f0a40' 0x17f0970 0x17f0a40
-          dump 'CHncFontGuide::HFTGetCharWidth 0x17f0a40..0x17f0b00' 0x17f0a40 0x17f0b00
-
-          # Keep the already-proven fallback-width normalization formula nearby for comparison.
-          dump 'HncGetFontOutline fit/fallback window 0x179c4d0..0x179c5a0' 0x179c4d0 0x179c5a0
-          dump 'GetFontWidth core 0x179adc0..0x179af30' 0x179adc0 0x179af30
-
-          # Compact operand index: no full-binary call-site dump.
-          echo '=== OPERAND/CALL INDEX ===' >> "$OUT"
-          grep -n -E 'GetFontOutlineData|HFTGetGlyphOutline|HFTGetCharWidth|HncGetFontOutline|GetFontWidth|GetFontEMSize|HncIntMulDiv|imul|idiv|0x1c\(|0x18\(' "$OUT" | head -n 800 >> "$OUT.index" || true
+          echo '=== DATAFLOW INDEX ===' >> "$OUT"
+          grep -n -E 'call.*17a2460|call.*180a4e0|0x8\(%rbp\)|0xa\(%rbp\)|0x14\(%rbp\)|0x10|0x20|_read|lseek|fseek|0x90\(%rsp\)|0xa0\(%rsp\)|0xb0\(%rsp\)|0xd0\(%rsp\)|0xd4\(%rsp\)' "$OUT" | head -n 1500 >> "$OUT.index" || true
           cat "$OUT.index" >> "$OUT" 2>/dev/null || true
 
           wc -l "$OUT"
-          tail -n 40 "$OUT"
+          tail -n 80 "$OUT"
 
       - uses: actions/upload-artifact@v7
         with:
