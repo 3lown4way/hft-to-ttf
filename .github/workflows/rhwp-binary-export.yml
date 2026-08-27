@@ -1,0 +1,84 @@
+name: rhwp binary export
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/rhwp-binary-export.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Checkout font repo
+        uses: actions/checkout@v7
+
+      - name: Rebuild runtime HFT faces
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --quiet fonttools
+          rm -rf fresh_ttf runtime_fonts
+          mkdir -p fresh_ttf runtime_fonts
+          for combo in $(seq 1 13); do
+            python converter/KICE09_HFT_converter_v3_4/build_one_combo_ci.py \
+              inputs/kice09-required48.zip \
+              converter/KICE09_HFT_converter_v3_4/analysis_v34/KICE09_fontref_combinations_v34.csv \
+              --combo "$combo" \
+              --outdir fresh_ttf
+          done
+          python - <<'PY'
+          from fontTools.ttLib import TTFont
+          from pathlib import Path
+          import shutil
+          src=Path('fresh_ttf'); dst=Path('runtime_fonts')
+          for i,p in enumerate(sorted(src.glob('*.ttf')),1):
+              out=dst/p.name
+              shutil.copy2(p,out)
+              f=TTFont(out)
+              ps=f'KICE09HFT{i:02d}-Regular'
+              for n in f['name'].names:
+                  if n.nameID == 6:
+                      n.string = ps.encode('utf-16-be') if n.isUnicode() else ps.encode('latin1')
+              f.save(out)
+          PY
+          test "$(find runtime_fonts -maxdepth 1 -name '*.ttf' | wc -l)" -eq 13
+
+      - name: Clone and prepare rhwp
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
+          cd rhwp-src
+          cargo build --release --bin font-metric-gen
+          ./target/release/font-metric-gen --dir ../runtime_fonts --output src/renderer/font_metrics_data.rs
+          cd ..
+          python tools/patch_rhwp_hft_native.py rhwp-src
+          python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
+
+      - name: Build rhwp native-skia
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libfreetype6-dev libfontconfig1-dev
+          cd rhwp-src
+          cargo build --release --features native-skia --bin rhwp
+          ./target/release/rhwp capabilities > ../rhwp-capabilities.json
+          file target/release/rhwp
+          ldd target/release/rhwp || true
+
+      - name: Upload rhwp runtime bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: rhwp-hft-native-runtime
+          path: |
+            rhwp-src/target/release/rhwp
+            runtime_fonts/*.ttf
+            rhwp-capabilities.json
+          if-no-files-found: error
+          compression-level: 0
