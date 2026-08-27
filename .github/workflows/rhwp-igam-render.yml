@@ -5,6 +5,10 @@ on:
     branches: [rhwp-smoke-20260825]
     paths:
       - '.github/workflows/rhwp-igam-render.yml'
+  pull_request:
+    paths:
+      - '.github/workflows/rhwp-igam-render.yml'
+      - 'inputs/igam-live-1-4.part*.b64'
   workflow_dispatch:
 
 permissions:
