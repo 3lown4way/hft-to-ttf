@@ -61,7 +61,7 @@ jobs:
           `treat_as_char=true` path, not a detached absolute-position shape.
           EOF
 
-      - name: Commit vendored customized tree
+      - name: Commit vendored customized tree to staging branch
         shell: bash
         run: |
           set -euo pipefail
@@ -70,7 +70,7 @@ jobs:
           git add rhwp/custom
           if git diff --cached --quiet; then
             echo 'No changes to commit.'
-            exit 0
+          else
+            git commit -m 'vendor: restore customized rhwp source tree'
           fi
-          git commit -m 'vendor: restore customized rhwp source tree'
-          git push origin HEAD:main
+          git push --force origin HEAD:refs/heads/jh/rhwp-vendored
