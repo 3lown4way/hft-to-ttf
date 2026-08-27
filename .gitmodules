@@ -1,0 +1,3 @@
+[submodule "rhwp/upstream"]
+	path = rhwp/upstream
+	url = https://github.com/edwardkim/rhwp.git
