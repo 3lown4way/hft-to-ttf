@@ -47,7 +47,7 @@ fn main() {
                 for p in 0..pc {
                     let len=must(doc.get_paragraph_length(s,p),"get_paragraph_length");
                     let txt=must(doc.get_text_range(s,p,0,len),"get_text_range");
-                    let controls=must(doc.get_control_text_positions(s,p),"get_control_text_positions");
+                    let controls=doc.get_control_text_positions(s,p);
                     println!("P{:03} len={} controls={} text={:?}",p,len,controls,txt);
                 }
             }
@@ -56,7 +56,7 @@ fn main() {
             if args.len()<5 { panic!("apply needs OPS.json OUTPUT.hwp"); }
             let ops:Vec<Op>=serde_json::from_slice(&fs::read(&args[3]).expect("read ops")).expect("parse ops");
             for (i,op) in ops.iter().enumerate() {
-                let r=match op {
+                let r: Result<String, wasm_bindgen::JsValue>=match op {
                     Op::ReplacePara{sec,para,text} => { let len=must(doc.get_paragraph_length(*sec,*para),"len"); doc.replace_text(*sec,*para,0,len,text) },
                     Op::ReplaceText{sec,para,start,len,text} => doc.replace_text(*sec,*para,*start,*len,text),
                     Op::ReplaceAll{query,text,case_sensitive} => doc.replace_all(query,text,*case_sensitive),
@@ -77,11 +77,11 @@ fn main() {
                     Op::InsertParagraph{sec,para} => doc.insert_paragraph(*sec,*para),
                     Op::CopySelection{sec,start_para,start,end_para,end} => doc.copy_selection(*sec,*start_para,*start,*end_para,*end),
                     Op::PasteInternal{sec,para,offset} => doc.paste_internal(*sec,*para,*offset),
-                    Op::SetCharShape{sec,para,start,end,char_shape} => doc.set_char_shape_id(*sec,*para,*start,*end,*char_shape),
-                    Op::SetCellCharShape{sec,para,control,cell,cell_para,start,end,char_shape} => doc.set_char_shape_id_in_cell(*sec,*para,*control,*cell,*cell_para,*start,*end,*char_shape),
-                    Op::SetParaShape{sec,para,para_shape} => doc.set_para_shape_id(*sec,*para,*para_shape),
-                    Op::SetCellParaShape{sec,para,control,cell,cell_para,para_shape} => doc.set_cell_para_shape_id(*sec,*para,*control,*cell,*cell_para,*para_shape),
-                    Op::ReflowLinesegs => { let n=must(doc.reflow_linesegs(),"reflow"); Ok(format!("{{\"ok\":true,\"reflowed\":{}}}",n)) },
+                    Op::SetCharShape{sec,para,start,end,char_shape} => doc.set_char_shape_id(*sec as usize,*para as usize,*start as usize,*end as usize,*char_shape),
+                    Op::SetCellCharShape{sec,para,control,cell,cell_para,start,end,char_shape} => doc.set_char_shape_id_in_cell(*sec as usize,*para as usize,*control as usize,*cell as usize,*cell_para as usize,*start as usize,*end as usize,*char_shape),
+                    Op::SetParaShape{sec,para,para_shape} => doc.set_para_shape_id(*sec as usize,*para as usize,*para_shape as u16),
+                    Op::SetCellParaShape{sec,para,control,cell,cell_para,para_shape} => doc.set_cell_para_shape_id(*sec as usize,*para as usize,*control as usize,*cell as usize,*cell_para as usize,*para_shape as u16),
+                    Op::ReflowLinesegs => { let n=doc.reflow_linesegs(); Ok(format!("{{\"ok\":true,\"reflowed\":{}}}",n)) },
                 };
                 eprintln!("op {} {:?} => {}",i,op,must(r,"op"));
             }
