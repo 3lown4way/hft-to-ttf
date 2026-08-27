@@ -18,16 +18,36 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Vendor pinned rhwp source
+      - name: Vendor pinned rhwp source-only tree
         shell: bash
         run: |
           set -euo pipefail
           rm -rf rhwp/custom /tmp/rhwp-upstream
-          git clone https://github.com/edwardkim/rhwp.git /tmp/rhwp-upstream
-          git -C /tmp/rhwp-upstream checkout 496333b27d21ddb9114ba9ae340bcb895870c9a7
-          rm -rf /tmp/rhwp-upstream/.git
+          git clone --filter=blob:none --no-checkout --depth=1 https://github.com/edwardkim/rhwp.git /tmp/rhwp-upstream
+          git -C /tmp/rhwp-upstream fetch --depth=1 origin 496333b27d21ddb9114ba9ae340bcb895870c9a7
+          git -C /tmp/rhwp-upstream sparse-checkout init --no-cone
+          cat > /tmp/rhwp-upstream/.git/info/sparse-checkout <<'EOF'
+          /src/
+          /tests/
+          /Cargo.toml
+          /Cargo.lock
+          /rust-toolchain.toml
+          /rustfmt.toml
+          /.cargo/
+          /.gitignore
+          /LICENSE
+          /README.md
+          /README_EN.md
+          /CLAUDE.md
+          EOF
+          git -C /tmp/rhwp-upstream checkout --detach FETCH_HEAD
           mkdir -p rhwp/custom
-          cp -a /tmp/rhwp-upstream/. rhwp/custom/
+          cp -a /tmp/rhwp-upstream/src rhwp/custom/
+          [ ! -d /tmp/rhwp-upstream/tests ] || cp -a /tmp/rhwp-upstream/tests rhwp/custom/
+          [ ! -d /tmp/rhwp-upstream/.cargo ] || cp -a /tmp/rhwp-upstream/.cargo rhwp/custom/
+          for f in Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml .gitignore LICENSE README.md README_EN.md CLAUDE.md; do
+            [ ! -e "/tmp/rhwp-upstream/$f" ] || cp -a "/tmp/rhwp-upstream/$f" rhwp/custom/
+          done
 
       - name: Restore preserved KICE/HFT runtime font metrics
         shell: bash
@@ -44,7 +64,7 @@ jobs:
           cat > rhwp/custom/JH_KICE_RECOVERY.md <<'EOF'
           # JH/KICE customized rhwp recovery
 
-          This tree is reconstructed from `edwardkim/rhwp` commit
+          This source snapshot is reconstructed from `edwardkim/rhwp` commit
           `496333b27d21ddb9114ba9ae340bcb895870c9a7` (v0.8.4), then overlaid with
           the rhwp source change that survived the previous JH working session:
 
@@ -53,6 +73,10 @@ jobs:
 
           Preserved SHA-256 of that source file:
           `5c0c65ced6f93236aac5279cbdbc9306672ec67dbcef2d1a77878af18385a007`.
+
+          The complete unmodified upstream repository remains pinned at
+          `rhwp/upstream`; this vendored tree intentionally keeps source/tests/build
+          metadata and omits upstream's very large binary/sample/document assets.
 
           Other session work such as quote glyph placement and HY견고딕 lives in
           the HFT/font pipeline and must not be replaced by arbitrary system fonts.
