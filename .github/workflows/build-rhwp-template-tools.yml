@@ -12,30 +12,64 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - name: Clone rhwp v0.8.4
-        run: git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
-      - name: Add template editor binary
-        run: cp tools/rhwp_template_editor.rs rhwp-src/src/bin/rhwp-template-editor.rs
+      - name: Rebuild runtime faces from source HFT
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf fresh_ttf runtime_fonts
+          mkdir -p fresh_ttf runtime_fonts
+          for combo in $(seq 1 13); do
+            python converter/KICE09_HFT_converter_v3_4/build_one_combo_ci.py \
+              inputs/kice09-required48.zip \
+              converter/KICE09_HFT_converter_v3_4/analysis_v34/KICE09_fontref_combinations_v34.csv \
+              --combo "$combo" --outdir fresh_ttf
+          done
+          python - <<'PY'
+          from fontTools.ttLib import TTFont
+          from pathlib import Path
+          import shutil
+          src=Path('fresh_ttf'); dst=Path('runtime_fonts')
+          for i,p in enumerate(sorted(src.glob('*.ttf')),1):
+              out=dst/p.name; shutil.copy2(p,out); f=TTFont(out)
+              ps=f'KICE09HFT{i:02d}-Regular'
+              for n in f['name'].names:
+                  if n.nameID == 6:
+                      n.string=ps.encode('utf-16-be') if n.isUnicode() else ps.encode('latin1')
+              f.save(out)
+          assert len(list(dst.glob('*.ttf')))==13
+          PY
+      - name: Clone rhwp v0.8.4 and inject runtime metrics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
+          cp tools/rhwp_template_editor.rs rhwp-src/src/bin/rhwp-template-editor.rs
+          cd rhwp-src
+          cargo build --release --bin font-metric-gen
+          ./target/release/font-metric-gen --dir ../runtime_fonts --output src/renderer/font_metrics_data.rs
       - name: Install native Skia dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libfreetype6-dev libfontconfig1-dev
-      - name: Patch renderer and build tools
+      - name: Apply repository rhwp patches and build
+        shell: bash
         run: |
+          set -euxo pipefail
           python tools/patch_rhwp_hft_native.py rhwp-src
           python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
           cd rhwp-src
           cargo build --release --features native-skia --bin rhwp --bin rhwp-template-editor
           ./target/release/rhwp capabilities > ../rhwp-capabilities.json
-      - name: Upload binaries
+      - name: Upload tools and internal runtime fonts
         uses: actions/upload-artifact@v7
         with:
           name: rhwp-template-tools-linux-x64
           path: |
             rhwp-src/target/release/rhwp
             rhwp-src/target/release/rhwp-template-editor
+            runtime_fonts/*.ttf
             rhwp-capabilities.json
           compression-level: 0
