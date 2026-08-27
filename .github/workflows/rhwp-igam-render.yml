@@ -112,12 +112,13 @@ jobs:
           pdfinfo out/igam-rhwp-direct.pdf | tee out/direct-pdfinfo.txt
           pdfinfo out/igam-rhwp-compat.pdf | tee out/compat-pdfinfo.txt
 
-      - name: Upload rendered PDFs
+      - name: Upload rendered PDFs and source HWPX
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: rhwp-igam-live-1-4-render
           path: |
+            input.hwpx
             out/igam-rhwp-direct.pdf
             out/igam-rhwp-compat.pdf
             out/info.txt
