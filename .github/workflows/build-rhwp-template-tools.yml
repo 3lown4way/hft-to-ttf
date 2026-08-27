@@ -1,0 +1,41 @@
+name: build rhwp template tools
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/build-rhwp-template-tools.yml'
+      - 'tools/rhwp_template_editor.rs'
+      - 'tools/patch_rhwp_hft_native.py'
+      - 'tools/patch_rhwp_hft_synthetic_bold.py'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v7
+      - name: Clone rhwp v0.8.4
+        run: git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
+      - name: Add template editor binary
+        run: cp tools/rhwp_template_editor.rs rhwp-src/src/bin/rhwp-template-editor.rs
+      - name: Install native Skia dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfreetype6-dev libfontconfig1-dev
+      - name: Patch renderer and build tools
+        run: |
+          python tools/patch_rhwp_hft_native.py rhwp-src
+          python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
+          cd rhwp-src
+          cargo build --release --features native-skia --bin rhwp --bin rhwp-template-editor
+          ./target/release/rhwp capabilities > ../rhwp-capabilities.json
+      - name: Upload binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: rhwp-template-tools-linux-x64
+          path: |
+            rhwp-src/target/release/rhwp
+            rhwp-src/target/release/rhwp-template-editor
+            rhwp-capabilities.json
+          compression-level: 0
