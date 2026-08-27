@@ -21,7 +21,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cat inputs/igam-live-1-4.part*.b64 | base64 -d > input.hwpx
+          cat inputs/igam-live-1-4.part*.b64 | base64 -di > input.hwpx
           file input.hwpx
           unzip -t input.hwpx
           sha256sum input.hwpx | tee input-sha256.txt
