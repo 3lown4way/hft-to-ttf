@@ -5,6 +5,9 @@ on:
     branches: [rhwp-smoke-20260825]
     paths:
       - '.github/workflows/rhwp-binary-export.yml'
+      - 'tools/patch_rhwp_hft_native.py'
+      - 'tools/patch_rhwp_hft_synthetic_bold.py'
+      - 'tools/patch_rhwp_official_hft_faces.py'
 
 permissions:
   contents: read
@@ -58,6 +61,7 @@ jobs:
           ./target/release/font-metric-gen --dir ../runtime_fonts --output src/renderer/font_metrics_data.rs
           cd ..
           python tools/patch_rhwp_hft_native.py rhwp-src
+          python tools/patch_rhwp_official_hft_faces.py rhwp-src
           python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
 
       - name: Build rhwp native-skia
