@@ -1,0 +1,171 @@
+name: quote Type3 audit
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/quote-type3-audit.yml'
+      - 'tools/audit_hft_source_truth.py'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/quote-type3-audit.yml'
+      - 'tools/audit_hft_source_truth.py'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download oracle PDF
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://savetest.com/18' \
+            'https://t1.daumcdn.net/cfile/tistory/1542AA124CE785323E' \
+            -o original-2009-june-language.pdf
+
+      - name: Audit HFT metrics and oracle quote horizontal semantics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --quiet fonttools pymupdf
+          python tools/audit_hft_source_truth.py | tee quote-type3-audit.txt
+
+      - name: Isolate quote Type3 widths and CharProcs
+        shell: bash
+        run: |
+          python - <<'PY' | tee -a quote-type3-audit.txt
+          import re
+          import pymupdf as fitz
+          doc = fitz.open('original-2009-june-language.pdf'); page=doc[0]
+          target_unicode={'‘':0x2018,'’':0x2019,'“':0x201C,'”':0x201D}
+          qfont=None
+          for sp in page.get_texttrace():
+              if any(chr(c[0]) in target_unicode for c in sp.get('chars',[])):
+                  qfont=str(sp.get('font','')); break
+          fx=None
+          for f in page.get_fonts(full=True):
+              if f[2]=='Type3' and qfont in {str(f[3]),str(f[4])}: fx=f[0]; break
+          if fx is None: raise SystemExit('quote font missing')
+          def ref(k):
+              kind,val=doc.xref_get_key(fx,k)
+              if kind!='xref': raise RuntimeError((k,kind,val))
+              return int(val.split()[0])
+          widths=[float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?',doc.xref_object(ref('Widths'),compressed=False))]
+          enc=doc.xref_object(ref('Encoding'),compressed=False)
+          m=re.search(r'/Differences\s*\[(.*?)\]',enc,re.S); toks=re.findall(r'/[^\s\[\]]+|\d+',m.group(1))
+          c2n={}; cur=None
+          for t in toks:
+              if t.startswith('/'): c2n[cur]=t[1:]; cur+=1
+              else: cur=int(t)
+          cpobj=doc.xref_object(ref('CharProcs'),compressed=False)
+          n2x={n:int(x) for n,x in re.findall(r'/([^\s/<>\[\]()]+)\s+(\d+)\s+0\s+R',cpobj)}
+          tu=doc.xref_stream(ref('ToUnicode')).decode('latin1','replace')
+          u2c={int(dst,16):int(src,16) for src,dst in re.findall(r'<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>',tu)}
+          def extrema(text):
+              toks=re.findall(r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)|[A-Za-z]+',text); nums=[]; xs=[]
+              ar={'m':2,'l':2,'c':6,'v':4,'y':4,'re':4}
+              for t in toks:
+                  try: nums.append(float(t)); continue
+                  except ValueError: pass
+                  if t in ar and len(nums)>=ar[t]:
+                      a=nums[-ar[t]:]
+                      if t in ('m','l'): xs.append(a[0])
+                      elif t=='c': xs += [a[0],a[2],a[4]]
+                      elif t in ('v','y'): xs += [a[0],a[2]]
+                      else: xs += [a[0],a[0]+a[2]]
+                  nums=[]
+              return min(xs),max(xs)
+          print('\n=== TARGETED TYPE3 QUOTE CHARPROCS ===')
+          for ch,ucp in target_unicode.items():
+              code=u2c.get(ucp)
+              if code is None: continue
+              name=c2n.get(code); px=n2x.get(name or '')
+              if px is None: continue
+              text=doc.xref_stream(px).decode('latin1','replace'); x0,x1=extrema(text)
+              print(repr(ch),'pdf_code',hex(code),'width',widths[code],'glyph',name,'charproc_xref',px,'x',x0,x1)
+              print(text)
+          PY
+
+      - name: Correlate all used SPSMJ symbols with Type3 metrics
+        shell: bash
+        run: |
+          python - <<'PY' | tee -a quote-type3-audit.txt
+          import re,sys,tempfile,zipfile
+          from pathlib import Path
+          import pymupdf as fitz
+          from fontTools.pens.boundsPen import BoundsPen
+          ROOT=Path('.'); sys.path.insert(0,str(ROOT/'converter'/'KICE09_HFT_converter_v3_4'))
+          from hft_core_v34 import iter_raw_records,read_meta,_char_for_record,_draw_ops
+          with tempfile.TemporaryDirectory() as td:
+              td=Path(td)
+              with zipfile.ZipFile(ROOT/'inputs'/'kice09-required48.zip') as z: z.extract('SPSMJ.HFT',td)
+              sp=td/'SPSMJ.HFT'; meta=read_meta(sp); source={}
+              for idx,code,adv,ops,enc in iter_raw_records(sp):
+                  ch=_char_for_record(meta,idx,code)
+                  if not ch: continue
+                  pen=BoundsPen(None); _draw_ops(ops,pen,0.0)
+                  if pen.bounds:
+                      x0,y0,x1,y1=pen.bounds; source[ch]=(code,float(x0),float(x1))
+          doc=fitz.open('original-2009-june-language.pdf'); page=doc[0]; fx=None
+          for f in page.get_fonts(full=True):
+              if f[2]=='Type3' and (str(f[3])=='T5' or str(f[4])=='T5'): fx=f[0]; break
+          if fx is None: raise SystemExit('T5 missing')
+          def ref(k):
+              kind,val=doc.xref_get_key(fx,k)
+              if kind!='xref': raise RuntimeError((k,kind,val))
+              return int(val.split()[0])
+          widths=[float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?',doc.xref_object(ref('Widths'),compressed=False))]
+          enc=doc.xref_object(ref('Encoding'),compressed=False); mm=re.search(r'/Differences\s*\[(.*?)\]',enc,re.S)
+          toks=re.findall(r'/[^\s\[\]]+|\d+',mm.group(1)); c2n={}; cur=None
+          for t in toks:
+              if t.startswith('/'): c2n[cur]=t[1:]; cur+=1
+              else: cur=int(t)
+          cpobj=doc.xref_object(ref('CharProcs'),compressed=False); n2x={n:int(x) for n,x in re.findall(r'/([^\s/<>\[\]()]+)\s+(\d+)\s+0\s+R',cpobj)}
+          code_to_unicode={}
+          for pno in range(doc.page_count):
+              for span in doc[pno].get_texttrace():
+                  if str(span.get('font',''))!='T5': continue
+                  for cp,gid,origin,bbox in span.get('chars',[]): code_to_unicode.setdefault(int(gid),int(cp))
+          def path_x(text):
+              toks=re.findall(r'[-+]?(?:\d+(?:\.\d*)?|\.\d+)|[A-Za-z]+',text); nums=[]; xs=[]; ar={'m':2,'l':2,'c':6,'v':4,'y':4,'re':4}
+              for t in toks:
+                  try: nums.append(float(t)); continue
+                  except ValueError: pass
+                  if t in ar and len(nums)>=ar[t]:
+                      a=nums[-ar[t]:]
+                      if t in ('m','l'): xs.append(a[0])
+                      elif t=='c': xs += [a[0],a[2],a[4]]
+                      elif t in ('v','y'): xs += [a[0],a[2]]
+                      else: xs += [a[0],a[0]+a[2]]
+                  nums=[]
+              return (min(xs),max(xs)) if xs else (None,None)
+          print('\n=== SPSMJ SOURCE vs OFFICIAL T5 USED SYMBOLS ALL 15 PAGES ===')
+          print('char,U+,hnc,src_xmin,src_xmax,src_ink_w,src_center,pdf_code,pdf_width,t3_xmin,t3_xmax,t3_ink_w,t3_center,center_err,left_trim_candidate,right_trim_candidate')
+          rows=[]
+          for code,cp in sorted(code_to_unicode.items()):
+              try: ch=chr(cp)
+              except ValueError: continue
+              if ch not in source or code>=len(widths): continue
+              name=c2n.get(code); px=n2x.get(name or '')
+              if px is None: continue
+              sx0,sx1=source[ch][1],source[ch][2]; t0,t1=path_x(doc.xref_stream(px).decode('latin1','replace'))
+              if t0 is None: continue
+              w=widths[code]; tc=(t0+t1)/2; sc=(sx0+sx1)/2
+              rows.append((ch,cp,source[ch][0],sx0,sx1,w,t0,t1))
+              print(f'{ch!r},U+{cp:04X},0x{source[ch][0]:04X},{sx0:.1f},{sx1:.1f},{sx1-sx0:.1f},{sc:.1f},0x{code:02X},{w:.1f},{t0:.1f},{t1:.1f},{t1-t0:.1f},{tc:.1f},{tc-w/2:+.1f},{1000-sx0:.1f},{sx1:.1f}')
+          print('joined_rows',len(rows))
+          print('WIDTH_CLASSES',sorted({r[5] for r in rows}))
+          PY
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: quote-type3-audit
+          path: quote-type3-audit.txt
+          if-no-files-found: error

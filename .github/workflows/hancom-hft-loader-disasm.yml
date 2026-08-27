@@ -1,0 +1,86 @@
+name: Hancom HFT loader disassembly
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/hancom-hft-loader-disasm.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/hancom-hft-loader-disasm.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download and extract official viewer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -H 'Referer: https://www.hancom.com/' -A 'Mozilla/5.0' \
+            'https://cdn.hancom.com/pds/hnc/VIE/hancomoffice-hwpviewer-Ubuntu-amd64.deb' -o hancom-viewer.deb
+          mkdir deb && cd deb && ar x ../hancom-viewer.deb && tar -xf data.tar.* && cd ..
+          test -x deb/usr/bin/hwpviewer
+
+      - name: Trace width metric node construction
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=deb/usr/bin/hwpviewer
+          OUT=hancom-hft-loader-disasm.txt
+          : > "$OUT"
+          echo '=== RELEVANT SYMBOLS ===' >> "$OUT"
+          readelf -Ws "$BIN" | grep -E 'OpenFontFile|OpenFont0|OpenFontMapsi|HncScanHFTs|InitHWPFont|GetBmBitmap|GetOlBitmap|HncDRGetHFTInfoFromDB|_OpenUserHFT|GetFontID|GetFontBuffer2|GetFontBuffer|OpenFontCfg' >> "$OUT" || true
+          echo >> "$OUT"
+
+          for sym in OpenFont0 OpenFontFile HncScanHFTs InitHWPFont HncDRGetHFTInfoFromDB _OpenUserHFT GetFontID; do
+            echo "=== DISASSEMBLY $sym ===" >> "$OUT"
+            objdump -d -C --no-show-raw-insn --disassemble="$sym" "$BIN" >> "$OUT" 2>&1 || true
+            echo >> "$OUT"
+          done
+
+          # C++/mangled functions shown by nm -D; use exact names where present.
+          for sym in \
+            _Z12OpenFontFileP11TypefaceDes \
+            _Z9OpenFont0P11TypefaceDesPKwi \
+            _Z11HncScanHFTsv \
+            _Z11InitHWPFontv \
+            _Z11GetBmBitmapP11TypefaceDestP8CharFontPi \
+            _Z11GetOlBitmapP11TypefaceDestiiiiPiP8CharFontS2_PFiPciE; do
+            echo "=== TRY MANGLED $sym ===" >> "$OUT"
+            objdump -d -C --no-show-raw-insn --disassemble="$sym" "$BIN" >> "$OUT" 2>&1 || true
+          done
+          echo >> "$OUT"
+
+          echo '=== TEXT REFERENCES TO HELPER 0x179A170 ===' >> "$OUT"
+          # all calls/jumps to the per-character width resolver discovered earlier
+          objdump -d -C --no-show-raw-insn "$BIN" 2>/dev/null \
+            | grep -E -B 12 -A 18 '(call|jmp).*179a170' \
+            | head -n 2000 >> "$OUT" || true
+          echo >> "$OUT"
+
+          echo '=== STORES/LOADS AT DESCRIPTOR +0x58 IN FONT OPEN REGION ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn --start-address=0x179c700 --stop-address=0x17a5000 "$BIN" 2>/dev/null \
+            | grep -E -B 12 -A 18 '0x58\(%r[a-z0-9]+\)' \
+            | head -n 2500 >> "$OUT" || true
+          echo >> "$OUT"
+
+          echo '=== FILE READ / ALLOC CALLS IN OPEN FONT REGION ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn --start-address=0x179c700 --stop-address=0x17a5000 "$BIN" 2>/dev/null \
+            | grep -E -B 10 -A 18 'call.*<(fread|fseek|fseeko|malloc|calloc|realloc|GetFontBuffer|GetFontBuffer2|OpenFontFile|OpenFont0)' \
+            | head -n 3500 >> "$OUT" || true
+          echo >> "$OUT"
+
+          cat "$OUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hancom-hft-loader-disasm
+          path: hancom-hft-loader-disasm.txt
+          if-no-files-found: error

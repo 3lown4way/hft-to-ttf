@@ -1,0 +1,35 @@
+name: HFT bitmap strike audit
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/hft-bitmap-strike-audit.yml'
+      - 'tools/analyze_hft_bitmap_strikes.py'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/hft-bitmap-strike-audit.yml'
+      - 'tools/analyze_hft_bitmap_strikes.py'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Analyze SP bitmap strike structures
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python tools/analyze_hft_bitmap_strikes.py inputs/kice09-required48.zip \
+            --fonts SPSMJ.HFT SPJGT.HFT TETGRSP.HFT \
+            | tee hft-bitmap-strike-audit.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hft-bitmap-strike-audit
+          path: hft-bitmap-strike-audit.txt
+          if-no-files-found: error

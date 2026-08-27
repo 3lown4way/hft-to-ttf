@@ -1,0 +1,171 @@
+name: Hancom HFT metadata audit
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/hancom-hftinfo-audit.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/hancom-hftinfo-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download official Hancom Linux viewer package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 \
+            -H 'Referer: https://www.hancom.com/' \
+            -A 'Mozilla/5.0' \
+            'https://cdn.hancom.com/pds/hnc/VIE/hancomoffice-hwpviewer-Ubuntu-amd64.deb' \
+            -o hancom-viewer.deb
+          ls -lh hancom-viewer.deb
+
+      - name: Extract only metadata diagnostics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir deb
+          cd deb
+          ar x ../hancom-viewer.deb
+          tar -xf data.tar.*
+          cd ..
+          find deb -type f \( -iname 'HFTInfo.dat' -o -iname 'FontInfo.dat' -o -iname 'FontList.lst' \) -print | sort | tee hancom-metadata-paths.txt
+          test -s hancom-metadata-paths.txt
+
+      - name: Analyze HFTInfo/FontInfo without publishing proprietary files
+        shell: bash
+        run: |
+          python - <<'PY' | tee hancom-hftinfo-audit.txt
+          from pathlib import Path
+          import re, struct, hashlib
+
+          files=[]
+          for p in Path('deb').rglob('*'):
+              if p.is_file() and p.name.lower() in {'hftinfo.dat','fontinfo.dat','fontlist.lst'}:
+                  files.append(p)
+          for p in sorted(files):
+              b=p.read_bytes()
+              print(f'FILE {p} size={len(b)} sha256={hashlib.sha256(b).hexdigest()}')
+              print(' head=',b[:64].hex(' '))
+              for enc in ('ascii','cp949','utf-16le'):
+                  try:
+                      t=b.decode(enc,errors='ignore')
+                  except Exception:
+                      continue
+                  hits=[]
+                  for needle in ('SPSMJ','SPJGT','TETGRSP','한양신명조','신명 태그래픽','신명 태고딕'):
+                      i=t.upper().find(needle.upper()) if needle.isascii() else t.find(needle)
+                      if i>=0: hits.append((needle,i,t[max(0,i-80):i+160].replace('\x00','·').replace('\r','\\r').replace('\n','\\n')))
+                  if hits:
+                      print(' decoded',enc)
+                      for h in hits: print('  HIT',repr(h))
+              print()
+
+          # HFTInfo is a UTF-16 text registry. Show its schema/section context around SPSMJ.
+          hp=next((p for p in files if p.name.lower()=='hftinfo.dat'),None)
+          if hp:
+              text=hp.read_bytes().decode('utf-16le',errors='ignore').lstrip('\ufeff')
+              lines=text.splitlines()
+              print('=== HFTINFO SECTION HEADERS ===')
+              for i,line in enumerate(lines):
+                  if line.strip().startswith('['): print(i,repr(line))
+              print('=== HFTINFO SPSMJ LINE CONTEXT ===')
+              for i,line in enumerate(lines):
+                  if 'SPSMJ.HFT' in line.upper():
+                      for j in range(max(0,i-8),min(len(lines),i+9)):
+                          print(f'{j:04d}: {lines[j]}')
+
+          # Inventory only names/sizes of non-HFT files beside the installed font engine.
+          fontdirs=[]
+          for p in Path('deb').rglob('HFTInfo.dat'):
+              fontdirs.append(p.parent)
+          for d in fontdirs:
+              print('=== FONT DIRECTORY NON-HFT INVENTORY',d,'===')
+              for p in sorted(d.iterdir()):
+                  if p.is_file() and p.suffix.lower()!='.hft':
+                      print(p.name,p.stat().st_size)
+
+          # Locate references / the actual installed SPSMJ.HFT, but report only paths and hashes.
+          print('=== PACKAGE SPSMJ REFERENCES ===')
+          for p in Path('deb').rglob('*'):
+              if not p.is_file(): continue
+              if p.name.upper()=='SPSMJ.HFT':
+                  b=p.read_bytes()
+                  print('FILE',p,'size',len(b),'sha256',hashlib.sha256(b).hexdigest())
+                  print('HEADER_0170_0250',b[0x170:0x250].hex(' '))
+                  continue
+              if p.stat().st_size > 200*1024*1024: continue
+              try: b=p.read_bytes()
+              except Exception: continue
+              pos=b.upper().find(b'SPSMJ.HFT')
+              if pos>=0: print('REF',p,'offset',hex(pos),'size',len(b))
+
+          # Compare package SPSMJ with the KICE09 input and decode unexplained SP header words.
+          import tempfile,zipfile
+          pkg=next(Path('deb').rglob('SPSMJ.HFT'),None)
+          with tempfile.TemporaryDirectory() as td:
+              td=Path(td)
+              with zipfile.ZipFile('inputs/kice09-required48.zip') as z:
+                  lookup={Path(n).name.upper():n for n in z.namelist() if not n.endswith('/')}
+                  kb=z.read(lookup['SPSMJ.HFT'])
+              print('=== KICE09 SPSMJ ===')
+              print('size',len(kb),'sha256',hashlib.sha256(kb).hexdigest())
+              print('HEADER_0170_0250',kb[0x170:0x250].hex(' '))
+              if pkg:
+                  pb=pkg.read_bytes()
+                  print('PACKAGE_EQUALS_KICE09',pb==kb)
+              print('=== SPSMJ HEADER U16 0x170..0x230 ===')
+              for off in range(0x170,0x230,2):
+                  print(f'{off:04X} {struct.unpack_from("<H",kb,off)[0]:5d} 0x{struct.unpack_from("<H",kb,off)[0]:04X}')
+              print('=== SPSMJ HEADER U32 0x200..0x230 ===')
+              for off in range(0x200,0x230,4):
+                  print(f'{off:04X} {struct.unpack_from("<I",kb,off)[0]:10d} 0x{struct.unpack_from("<I",kb,off)[0]:08X}')
+
+              # Across all KICE09 SP faces, report header words so family-varying metadata becomes visible.
+              print('=== ALL KICE09 SP HEADER SIGNATURES ===')
+              from io import BytesIO
+              with zipfile.ZipFile('inputs/kice09-required48.zip') as z:
+                  for name in sorted(n for n in z.namelist() if n.upper().endswith('.HFT')):
+                      b=z.read(name)
+                      if len(b)<0x234 or struct.unpack_from('<H',b,0x1A0)[0]!=0x20: continue
+                      vals=[struct.unpack_from('<H',b,o)[0] for o in range(0x200,0x230,2)]
+                      print(Path(name).name,'size',len(b),'u16_0200_022E',vals)
+          PY
+
+      - name: Inspect HFT-related engine strings and dynamic symbols
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > hancom-hft-engine.txt
+          # Find binaries/libraries that explicitly refer to HFTInfo.dat; do not copy binaries.
+          while IFS= read -r -d '' f; do
+            if grep -a -q -i 'HFTInfo.dat' "$f" 2>/dev/null; then
+              echo "=== FILE $f size=$(stat -c%s "$f") ===" >> hancom-hft-engine.txt
+              strings -a "$f" | grep -Ei 'HFT|font.*width|width.*font|glyph.*width|width.*glyph' | head -n 120 >> hancom-hft-engine.txt || true
+              if file "$f" | grep -q ELF; then
+                nm -D "$f" 2>/dev/null | grep -Ei 'hft|font.*width|width.*font|glyph.*width|width.*glyph' | head -n 120 >> hancom-hft-engine.txt || true
+              fi
+            fi
+          done < <(find deb/usr -type f -print0)
+          cat hancom-hft-engine.txt
+
+      - name: Upload diagnostics only
+        uses: actions/upload-artifact@v7
+        with:
+          name: hancom-hftinfo-audit
+          path: |
+            hancom-metadata-paths.txt
+            hancom-hftinfo-audit.txt
+            hancom-hft-engine.txt
+          if-no-files-found: error

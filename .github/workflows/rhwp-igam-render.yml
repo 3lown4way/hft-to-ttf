@@ -1,0 +1,131 @@
+name: rhwp I-GAM HWPX render
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/rhwp-igam-render.yml'
+  pull_request:
+    paths:
+      - '.github/workflows/rhwp-igam-render.yml'
+      - 'inputs/igam-live-1-4.part*.b64'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Reassemble HWPX input
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat inputs/igam-live-1-4.part*.b64 | base64 -di > input.hwpx
+          file input.hwpx
+          unzip -t input.hwpx
+          sha256sum input.hwpx | tee input-sha256.txt
+
+      - name: Prepare runtime TTFs with revised quote metrics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --quiet fonttools
+          rm -rf runtime_fonts
+          mkdir runtime_fonts
+          python - <<'PY'
+          from pathlib import Path
+          from fontTools.ttLib import TTFont
+          import shutil
+
+          targets = {
+              '신명 중명조',
+              '신명 중명조 - 한양영문',
+              '신명 중명조 - 한양문자',
+              '신명 중고딕 - 혼합',
+          }
+          widths = {'‘': 230, '’': 230, '“': 441, '”': 441}
+          changed=[]
+          for i,p in enumerate(sorted(Path('output_ttf').glob('*.ttf')),1):
+              out=Path('runtime_fonts')/p.name
+              shutil.copy2(p,out)
+              f=TTFont(out)
+              family=next((n.toUnicode() for n in f['name'].names if n.nameID==1),'')
+              if family in targets:
+                  cmap=f.getBestCmap() or {}
+                  for ch,adv in widths.items():
+                      g=cmap.get(ord(ch))
+                      if not g:
+                          raise SystemExit(f'{family}: missing {ch}')
+                      old,lsb=f['hmtx'].metrics[g]
+                      f['hmtx'].metrics[g]=(adv,lsb)
+                      print('QUOTE_METRIC',family,ch,old,'->',adv,'lsb',lsb)
+                  changed.append(family)
+              ps=f'KICE09QUOTE{i:02d}-Regular'
+              for n in f['name'].names:
+                  if n.nameID==6:
+                      n.string=ps.encode('utf-16-be') if n.isUnicode() else ps.encode('latin1')
+              f.save(out)
+          if set(changed)!=targets:
+              raise SystemExit(f'wrong changed family set: {changed!r}')
+          print('runtime fonts',len(list(Path('runtime_fonts').glob('*.ttf'))))
+          PY
+
+      - name: Build the same rhwp v0.8.4 used by repository Actions
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
+          cd rhwp-src
+          cargo build --release --bin font-metric-gen
+          ./target/release/font-metric-gen --dir ../runtime_fonts --output src/renderer/font_metrics_data.rs
+          cd ..
+          python tools/patch_rhwp_hft_native.py rhwp-src
+          python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
+          sudo apt-get update
+          sudo apt-get install -y libfreetype6-dev libfontconfig1-dev poppler-utils
+          cd rhwp-src
+          cargo build --release --features native-skia --bin rhwp
+          ./target/release/rhwp capabilities > ../rhwp-capabilities.json
+
+      - name: Render HWPX pages 1-4
+        shell: bash
+        env:
+          RHWP_FONT_PATH: ${{ github.workspace }}/runtime_fonts
+        run: |
+          set -euxo pipefail
+          RHWP='./rhwp-src/target/release/rhwp'
+          mkdir -p out/compat out/direct out/svg
+          "$RHWP" info input.hwpx | tee out/info.txt
+          for p in 0 1 2 3; do
+            n=$((p+1))
+            "$RHWP" export-svg input.hwpx -p "$p" -o out/svg
+            "$RHWP" export-pdf input.hwpx -p "$p" -o "out/compat/page-${n}.pdf"
+            "$RHWP" export-pdf input.hwpx -p "$p" --backend direct --font-path "${{ github.workspace }}/runtime_fonts" -o "out/direct/page-${n}.pdf"
+          done
+          pdfunite out/compat/page-1.pdf out/compat/page-2.pdf out/compat/page-3.pdf out/compat/page-4.pdf out/igam-rhwp-compat.pdf
+          pdfunite out/direct/page-1.pdf out/direct/page-2.pdf out/direct/page-3.pdf out/direct/page-4.pdf out/igam-rhwp-direct.pdf
+          pdfinfo out/igam-rhwp-direct.pdf | tee out/direct-pdfinfo.txt
+          pdfinfo out/igam-rhwp-compat.pdf | tee out/compat-pdfinfo.txt
+
+      - name: Upload rendered PDFs and source HWPX
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rhwp-igam-live-1-4-render
+          path: |
+            input.hwpx
+            out/igam-rhwp-direct.pdf
+            out/igam-rhwp-compat.pdf
+            out/info.txt
+            out/direct-pdfinfo.txt
+            out/compat-pdfinfo.txt
+            out/svg/**
+            input-sha256.txt
+            rhwp-capabilities.json
+          if-no-files-found: warn
+          compression-level: 0

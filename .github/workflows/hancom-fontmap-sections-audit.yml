@@ -1,0 +1,77 @@
+name: Hancom symbol family metadata audit
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/hancom-fontmap-sections-audit.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/hancom-fontmap-sections-audit.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download and extract official viewer metadata
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -H 'Referer: https://www.hancom.com/' -A 'Mozilla/5.0' \
+            'https://cdn.hancom.com/pds/hnc/VIE/hancomoffice-hwpviewer-Ubuntu-amd64.deb' -o hancom-viewer.deb
+          mkdir deb && cd deb && ar x ../hancom-viewer.deb && tar -xf data.tar.* && cd ..
+      - name: Inspect Symbol family sections and FontMap
+        shell: bash
+        run: |
+          python - <<'PY' | tee hancom-symbol-family-metadata.txt
+          from pathlib import Path
+          import hashlib,re
+          d=next(Path('deb').rglob('HFTInfo.dat')).parent
+          def decode(p):
+              b=p.read_bytes()
+              for enc in ('utf-16le','utf-8','cp949'):
+                  try:
+                      t=b.decode(enc)
+                      if '\x00' not in t[:200]: return t.lstrip('\ufeff\uffff'),enc
+                  except Exception: pass
+              return b.decode('utf-16le',errors='ignore').lstrip('\ufeff\uffff'),'utf-16le?'
+          hp=d/'HFTInfo.dat'; ht,enc=decode(hp); lines=ht.splitlines()
+          print('HFTInfo',len(hp.read_bytes()),hashlib.sha256(hp.read_bytes()).hexdigest(),'encoding',enc)
+          targets=['[Family Category - Symbol]','[Family Category Definition - Symbol]']
+          for target in targets:
+              print('\n===',target,'===')
+              try: i=next(i for i,x in enumerate(lines) if x.strip()==target)
+              except StopIteration: continue
+              j=i+1
+              while j<len(lines) and not lines[j].strip().startswith('['):
+                  print(f'{j:04d}: {lines[j]}'); j+=1
+          fp=d/'FontMap.dat'; ft,fenc=decode(fp); fl=ft.splitlines()
+          print('\nFontMap',len(fp.read_bytes()),hashlib.sha256(fp.read_bytes()).hexdigest(),'encoding',fenc)
+          print('=== FONTMAP SECTION HEADERS ===')
+          for i,x in enumerate(fl):
+              if x.strip().startswith('['): print(i,repr(x))
+          print('=== FONTMAP TARGET CONTEXT ===')
+          needles=('SPSMJ','한양신명조','Symbol','심볼','기호','width','Width','비례')
+          seen=set()
+          for i,x in enumerate(fl):
+              if any(n in x for n in needles):
+                  lo=max(0,i-3); hi=min(len(fl),i+4)
+                  key=(lo,hi)
+                  if key in seen: continue
+                  seen.add(key)
+                  print(f'-- lines {lo}..{hi-1} --')
+                  for j in range(lo,hi): print(f'{j:04d}: {fl[j]}')
+          print('=== FONTMAP FIRST 80 LINES ===')
+          for i,x in enumerate(fl[:80]): print(f'{i:04d}: {x}')
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hancom-symbol-family-metadata
+          path: hancom-symbol-family-metadata.txt
+          if-no-files-found: error

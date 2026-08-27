@@ -1,0 +1,29 @@
+name: fetch original 2009 June language PDF
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/fetch-original-2009-6-pdf.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download original PDF
+        shell: bash
+        run: |
+          set -euxo pipefail
+          URL='https://t1.daumcdn.net/cfile/tistory/1542AA124CE785323E'
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://savetest.com/18' "$URL" -o original-2009-june-language.pdf
+          file original-2009-june-language.pdf
+      - name: Upload original PDF
+        uses: actions/upload-artifact@v7
+        with:
+          name: original-2009-june-language-pdf
+          path: original-2009-june-language.pdf
+          if-no-files-found: error
+          compression-level: 0

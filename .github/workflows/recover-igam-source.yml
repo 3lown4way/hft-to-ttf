@@ -1,0 +1,32 @@
+name: recover I-GAM source HWPX
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/recover-igam-source.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Reassemble source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat inputs/igam-live-1-4.part*.b64 | base64 -di > input.hwpx
+          unzip -t input.hwpx
+          sha256sum input.hwpx > input-sha256.txt
+      - name: Upload source
+        uses: actions/upload-artifact@v7
+        with:
+          name: igam-live-1-4-source
+          path: |
+            input.hwpx
+            input-sha256.txt
+          compression-level: 0

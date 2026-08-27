@@ -1,0 +1,107 @@
+name: Hancom symbol width table scan
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/hancom-symbol-width-table-scan.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/hancom-symbol-width-table-scan.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download and extract official viewer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -H 'Referer: https://www.hancom.com/' -A 'Mozilla/5.0' \
+            'https://cdn.hancom.com/pds/hnc/VIE/hancomoffice-hwpviewer-Ubuntu-amd64.deb' -o hancom-viewer.deb
+          mkdir deb && cd deb && ar x ../hancom-viewer.deb && tar -xf data.tar.* && cd ..
+      - name: Scan binary/data files for HNC 0x3400 width signature
+        shell: bash
+        run: |
+          python - <<'PY' | tee hancom-symbol-width-table-scan.txt
+          from pathlib import Path
+          import struct,hashlib
+
+          # Official 2009 Type3 widths for SPSMJ-associated HNC codes.
+          known={
+              0x3404:384,
+              0x340E:230,
+              0x340F:230,
+              0x3410:441,
+              0x3411:441,
+              0x3466:1000,
+              0x3590:1000,
+              0x3591:1000,
+              0x36E7:1000,
+              0x36E8:1000,
+              0x36E9:1000,
+              0x36EA:1000,
+              0x36EB:1000,
+          }
+          roots=[Path('deb/usr')]
+          candidates=[]
+          for p in roots[0].rglob('*'):
+              if not p.is_file(): continue
+              sz=p.stat().st_size
+              if sz<200 or sz>200*1024*1024: continue
+              try: b=p.read_bytes()
+              except Exception: continue
+              for unit,fmt in ((2,'<H'),(4,'<I')):
+                  for basecode in (0x3400,0x3401):
+                      rel={c:(c-basecode)*unit for c in known if c>=basecode}
+                      maxrel=max(rel.values())
+                      if len(b)<=maxrel: continue
+                      # Anchor on 0x340E=230, then verify all nearby known values and far values when in range.
+                      anchor=(0x340E-basecode)*unit
+                      needle=struct.pack(fmt,230)
+                      pos=0
+                      while True:
+                          q=b.find(needle,pos)
+                          if q<0: break
+                          start=q-anchor
+                          pos=q+1
+                          if start<0 or start+maxrel+unit>len(b): continue
+                          # enforce alignment relative to candidate table
+                          score=0; matched=[]; mismatched=[]
+                          for c,v in known.items():
+                              off=start+(c-basecode)*unit
+                              if off<start or off+unit>len(b): continue
+                              got=struct.unpack_from(fmt,b,off)[0]
+                              if got==v:
+                                  score+=1; matched.append((c,v))
+                              else:
+                                  mismatched.append((c,v,got))
+                          # Core punctuation signature must match exactly.
+                          core=(0x3404,0x340E,0x340F,0x3410,0x3411)
+                          if all(any(c==x for c,_ in matched) for x in core):
+                              candidates.append((score,p,start,unit,basecode,matched,mismatched[:8]))
+          candidates.sort(key=lambda x:(-x[0],str(x[1]),x[2]))
+          print('candidate_count',len(candidates))
+          for score,p,start,unit,basecode,matched,mismatch in candidates[:200]:
+              print(f'CAND score={score}/{len(known)} file={p} size={p.stat().st_size} sha256={hashlib.sha256(p.read_bytes()).hexdigest()} start=0x{start:X} unit={unit} basecode=0x{basecode:04X}')
+              print(' matched',[(hex(c),v) for c,v in matched])
+              print(' mismatch_sample',[(hex(c),v,g) for c,v,g in mismatch])
+              # Dump first 96 table values only, not arbitrary binary contents.
+              b=p.read_bytes(); vals=[]
+              for i in range(96):
+                  off=start+i*unit
+                  if off+unit>len(b): break
+                  vals.append(struct.unpack_from('<H' if unit==2 else '<I',b,off)[0])
+              print(' first96',vals)
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hancom-symbol-width-table-scan
+          path: hancom-symbol-width-table-scan.txt
+          if-no-files-found: error

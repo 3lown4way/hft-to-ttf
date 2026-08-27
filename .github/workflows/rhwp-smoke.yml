@@ -5,10 +5,24 @@ on:
     branches: [rhwp-smoke-20260825]
     paths:
       - '.github/workflows/rhwp-smoke.yml'
+      - 'tools/patch_rhwp_hft_native.py'
+      - 'tools/patch_rhwp_hft_synthetic_bold.py'
+      - 'tools/audit_hft_source_truth.py'
+      - 'tools/compare_pdf_punctuation_baselines.py'
+      - 'tools/audit_punctuation_horizontal_semantics.py'
+      - 'converter/KICE09_HFT_converter_v3_4/**'
+      - 'inputs/kice09-required48.zip'
   pull_request:
     branches: [main, rhwp-ci-base]
     paths:
       - '.github/workflows/rhwp-smoke.yml'
+      - 'tools/patch_rhwp_hft_native.py'
+      - 'tools/patch_rhwp_hft_synthetic_bold.py'
+      - 'tools/audit_hft_source_truth.py'
+      - 'tools/compare_pdf_punctuation_baselines.py'
+      - 'tools/audit_punctuation_horizontal_semantics.py'
+      - 'converter/KICE09_HFT_converter_v3_4/**'
+      - 'inputs/kice09-required48.zip'
 
 permissions:
   contents: read
@@ -16,84 +30,280 @@ permissions:
 jobs:
   render:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - name: Checkout font repo
         uses: actions/checkout@v7
 
-      - name: Download original 2009 June HWP
+      - name: Download original 2009 June HWP and PDF oracle
         shell: bash
         run: |
           set -euxo pipefail
-          URL='https://t1.daumcdn.net/cfile/tistory/262D61365269C48115'
-          curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://legendstudy.com/223' "$URL" -o input.hwp
+          HWP_URL='https://t1.daumcdn.net/cfile/tistory/262D61365269C48115'
+          PDF_URL='https://t1.daumcdn.net/cfile/tistory/1542AA124CE785323E'
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://legendstudy.com/223' "$HWP_URL" -o input.hwp
           echo '59af2533f5a12fee6685f9c9f3b8a646a54997badaba3c062138c7d04f5e6205  input.hwp' | sha256sum -c -
+          # Comparison-only oracle: never used as a glyph/metric source.
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://savetest.com/18' "$PDF_URL" -o original-2009-june-language.pdf
+          file original-2009-june-language.pdf
 
-      - name: Prepare runtime font copies
+      - name: Audit HFT source truth
         shell: bash
         run: |
           set -euxo pipefail
           python -m pip install --quiet fonttools
-          mkdir -p runtime_fonts
+          python tools/audit_hft_source_truth.py | tee hft-source-audit.txt
+
+      - name: Rebuild all runtime faces from source HFT
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf fresh_ttf runtime_fonts
+          mkdir -p fresh_ttf runtime_fonts
+          : > fresh-build.log
+          for combo in $(seq 1 13); do
+            python converter/KICE09_HFT_converter_v3_4/build_one_combo_ci.py \
+              inputs/kice09-required48.zip \
+              converter/KICE09_HFT_converter_v3_4/analysis_v34/KICE09_fontref_combinations_v34.csv \
+              --combo "$combo" \
+              --outdir fresh_ttf \
+              | tee -a fresh-build.log
+          done
+          test "$(find fresh_ttf -maxdepth 1 -name '*.ttf' | wc -l)" -eq 13
+
           python - <<'PY'
           from fontTools.ttLib import TTFont
           from pathlib import Path
-          import shutil, re
-          src=Path('output_ttf'); dst=Path('runtime_fonts')
+          import shutil
+
+          src=Path('fresh_ttf')
+          dst=Path('runtime_fonts')
           for i,p in enumerate(sorted(src.glob('*.ttf')),1):
               out=dst/p.name
               shutil.copy2(p,out)
               f=TTFont(out)
-              # Keep family/full names exactly as generated; only make the PostScript
-              # name unique so multiple KICE composite faces can coexist in one fontdb.
-              ps=f'KICE09Combo{i:02d}-Regular'
+              ps=f'KICE09HFT{i:02d}-Regular'
               for n in f['name'].names:
-                  if n.nameID==6:
-                      if n.isUnicode(): n.string=ps.encode('utf-16-be')
-                      else: n.string=ps.encode('latin1')
+                  if n.nameID == 6:
+                      n.string = ps.encode('utf-16-be') if n.isUnicode() else ps.encode('latin1')
               f.save(out)
+          print('fresh runtime fonts', len(list(dst.glob('*.ttf'))))
+          PY
+          test ! -e runtime_fonts/.pdf-patched
+
+      - name: Verify integrated source-derived quote placement
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python - <<'PY' | tee integrated-quote-placement.txt
+          from fontTools.ttLib import TTFont
+          from pathlib import Path
+
+          checked=0
+          for p in sorted(Path('runtime_fonts').glob('*.ttf')):
+              f=TTFont(p)
+              cmap=f.getBestCmap() or {}
+              glyf=f['glyf']
+              metrics=f['hmtx'].metrics
+              for oc, cc in ((0x2018,0x2019),(0x201C,0x201D)):
+                  on=cmap.get(oc); cn=cmap.get(cc)
+                  if not on or not cn: continue
+                  og=glyf[on]; cg=glyf[cn]
+                  og.recalcBounds(glyf); cg.recalcBounds(glyf)
+                  oa, olsb=metrics[on]
+                  ca, clsb=metrics[cn]
+                  # Integrated build must preserve source advances.  Placement is
+                  # represented by outline/LSB translation, not PDF-derived hmtx.
+                  print(p.name, chr(oc), 'x', og.xMin, og.xMax, 'adv', oa, 'lsb', olsb,
+                        '|', chr(cc), 'x', cg.xMin, cg.xMax, 'adv', ca, 'lsb', clsb)
+                  if og.xMin > cg.xMax + 100:
+                      raise SystemExit(f'{p.name}: opener remains on far-right source-cell placement')
+                  checked += 1
+          if checked == 0:
+              raise SystemExit('no smart-quote pairs found in rebuilt fonts')
+          print('OK paired quote placement samples', checked)
           PY
 
-      - name: Build rhwp v0.8.4 with KICE09 charPr font bridge
+      - name: Build rhwp metric generator and inject runtime TTF hmtx
         shell: bash
         run: |
           set -euxo pipefail
           git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
-          python - <<'PY'
-          from pathlib import Path
-          p=Path('rhwp-src/src/renderer/style_resolver.rs')
-          s=p.read_text(encoding='utf-8')
-          old='''fn resolve_char_styles(doc_info: &DocInfo, dpi: f64) -> Vec<ResolvedCharStyle> {\n    doc_info\n        .char_shapes\n        .iter()\n        .map(|cs| resolve_single_char_style(cs, doc_info, dpi))\n        .collect()\n}\n'''
-          new='''fn kice09_composite_family(char_pr_id: usize) -> Option<&'static str> {\n    match char_pr_id {\n        0 | 68 => Some("한양중고딕"),\n        1 | 19 | 20 => Some("신명 디나루"),\n        2 | 25 => Some("신명 중고딕"),\n        5 | 11 | 17 | 42 | 49 | 59 | 63 | 72 | 82 | 84 | 85 => Some("신명 중명조 - 한양영문"),\n        6 | 93 => Some("신명 중명조"),\n        7 | 8 | 9 | 12 | 13 | 14 | 15 | 23 | 24 | 29 | 32 | 33 | 34 | 47 | 56 | 60 | 61 | 64 | 65 | 67 | 70 | 71 | 74 | 75 | 76 | 77 | 78 | 79 | 80 | 81 | 83 | 86 | 88 | 89 | 90 | 91 | 92 | 94 | 95 | 99 | 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 => Some("신명 중명조 - 한양문자"),\n        16 | 73 | 87 => Some("신명 태고딕"),\n        18 => Some("한양견명조"),\n        21 | 48 | 54 | 55 => Some("신명 견명조"),\n        22 => Some("#태고딕"),\n        46 | 51 | 52 | 53 | 57 | 58 => Some("신명 신그래픽"),\n        50 => Some("신명 궁서"),\n        96 | 97 | 98 => Some("신명 중고딕 - 혼합"),\n        _ => None,\n    }\n}\n\nfn resolve_char_styles(doc_info: &DocInfo, dpi: f64) -> Vec<ResolvedCharStyle> {\n    doc_info\n        .char_shapes\n        .iter()\n        .enumerate()\n        .map(|(char_pr_id, cs)| {\n            let mut style = resolve_single_char_style(cs, doc_info, dpi);\n            if doc_info.char_shapes.len() == 108 {\n                if let Some(family) = kice09_composite_family(char_pr_id) {\n                    style.font_family = family.to_string();\n                    style.font_families = vec![family.to_string(); LANG_COUNT];\n                }\n            }\n            style\n        })\n        .collect()\n}\n'''
-          if old not in s:
-              raise SystemExit('target resolve_char_styles block not found')
-          p.write_text(s.replace(old,new,1),encoding='utf-8')
-          PY
           cd rhwp-src
-          cargo build --release --bin rhwp
+          cargo build --release --bin font-metric-gen
+          ./target/release/font-metric-gen --dir ../runtime_fonts --output src/renderer/font_metrics_data.rs | tee ../runtime-font-metric-gen.txt
+          grep -F '한양견명조' src/renderer/font_metrics_data.rs
+          grep -F '신명 중명조 - 한양문자' src/renderer/font_metrics_data.rs
+
+      - name: Install native Skia font dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libfreetype6-dev libfontconfig1-dev
+
+      - name: Build rhwp v0.8.4 with HFT-native bridges and direct PDF backend
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python tools/patch_rhwp_hft_native.py rhwp-src
+          python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
+          cd rhwp-src
+          cargo build --release --features native-skia --bin rhwp
           ./target/release/rhwp capabilities > ../rhwp-capabilities.json
 
-      - name: Render untouched HWP with native KICE09 composite faces
+      - name: Render untouched HWP with freshly rebuilt HFT-derived faces
         shell: bash
         env:
           RHWP_FONT_PATH: ${{ github.workspace }}/runtime_fonts
         run: |
           set -euxo pipefail
           RHWP='./rhwp-src/target/release/rhwp'
-          mkdir -p out/svg out/dump-pages
+          mkdir -p out/svg out/dump-pages out/direct
           "$RHWP" info input.hwp > out/info.txt
+          : > out/direct/direct-status.txt
           for p in 0 1 2 3 4; do
             "$RHWP" export-svg input.hwp -p "$p" -o out/svg
             "$RHWP" export-pdf input.hwp -p "$p" --text-as-paths -o "out/page-$((p+1))-paths.pdf"
+            "$RHWP" export-pdf input.hwp -p "$p" -o "out/page-$((p+1))-embedded.pdf"
+            if "$RHWP" export-pdf input.hwp -p "$p" --backend direct --font-path "${{ github.workspace }}/runtime_fonts" -o "out/direct/page-$((p+1))-embedded.pdf" 2>"out/direct/page-$((p+1))-stderr.txt"; then
+              echo "page-$((p+1)) direct=success" | tee -a out/direct/direct-status.txt
+            else
+              status=$?
+              echo "page-$((p+1)) direct=failed:$status" | tee -a out/direct/direct-status.txt
+            fi
             "$RHWP" dump-pages input.hwp -p "$p" > "out/dump-pages/page-$((p+1)).txt"
           done
 
+      - name: Compare compatibility PDF punctuation Y placement against oracle PDF
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --quiet pymupdf pillow numpy
+          python tools/compare_pdf_punctuation_baselines.py \
+            --oracle original-2009-june-language.pdf \
+            --generated-dir out \
+            --pages 5 \
+            --dpi 600 \
+            --out-dir out/baseline-audit \
+            | tee out/baseline-audit-console.txt
+
+      - name: Compare direct Skia PDF punctuation Y placement against oracle PDF
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if find out/direct -maxdepth 1 -name 'page-*-embedded.pdf' -print -quit | grep -q .; then
+            python tools/compare_pdf_punctuation_baselines.py \
+              --oracle original-2009-june-language.pdf \
+              --generated-dir out/direct \
+              --pages 5 \
+              --dpi 600 \
+              --out-dir out/direct/baseline-audit \
+              | tee out/direct/baseline-audit-console.txt
+          else
+            echo 'No direct PDF pages were generated.' | tee out/direct/baseline-audit-console.txt
+          fi
+
+      - name: Compare compatibility PDF punctuation X semantics against source HFT TTF
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python tools/audit_punctuation_horizontal_semantics.py \
+            --oracle original-2009-june-language.pdf \
+            --generated-dir out \
+            --runtime-fonts runtime_fonts \
+            --pages 5 \
+            | tee out/horizontal-audit-console.txt
+
+      - name: Compare direct Skia PDF punctuation X semantics against source HFT TTF
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python tools/audit_punctuation_horizontal_semantics.py \
+            --oracle original-2009-june-language.pdf \
+            --generated-dir out/direct \
+            --runtime-fonts runtime_fonts \
+            --pages 5 \
+            | tee out/direct/horizontal-audit-console.txt
+
+      - name: Collect non-blocking SVG diagnostics
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY' | tee svg-diagnostics.txt
+          import html, re
+          from pathlib import Path
+
+          svgs=sorted(Path('out/svg').glob('*.svg'))
+          print('SVG_COUNT', len(svgs))
+          for path in svgs:
+              s=path.read_text(encoding='utf-8')
+              plain=html.unescape(re.sub(r'<[^>]+>', '', s))
+              if '【' in s or '【' in plain:
+                  print('BRACKET_FILE', path.name)
+                  for m in re.finditer(r'<text\b[^>]*>.*?</text>', s, re.S):
+                      node=m.group(0)
+                      txt=html.unescape(re.sub(r'<[^>]+>', '', node))
+                      if '【' in txt or '】' in txt:
+                          print('BRACKET_NODE', path.name, repr(txt[:120]), node[:500].replace('\n',' '))
+              if '10.' in plain:
+                  print('QUESTION10_FILE', path.name)
+                  for m in re.finditer(r'<text\b[^>]*>.*?</text>', s, re.S):
+                      node=m.group(0)
+                      txt=html.unescape(re.sub(r'<[^>]+>', '', node))
+                      if '10.' in txt:
+                          print('QUESTION10_NODE', path.name, repr(txt[:120]), node[:500].replace('\n',' '))
+                          break
+          all_svg='\n'.join(p.read_text(encoding='utf-8') for p in svgs)
+          print('LEGACY_HFT_BOLD_STROKE', 'stroke-width="0.16"' in all_svg)
+          print('GENERIC_BOLD_MARKER', 'font-weight="bold"' in all_svg)
+          PY
+
+      - name: Verify legacy HFT bold paint semantics
+        if: success()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          grep -R -F 'stroke-width="0.16"' out/svg/input_002.svg
+          python - <<'PY'
+          import re, html
+          from pathlib import Path
+          s=Path('out/svg/input_002.svg').read_text(encoding='utf-8')
+          nodes=[]
+          for m in re.finditer(r'<text\b[^>]*>.*?</text>', s, re.S):
+              node=m.group(0)
+              txt=html.unescape(re.sub(r'<[^>]+>', '', node))
+              if txt in {'【','】'} and '신명 중명조 - 한양문자' in html.unescape(node):
+                  nodes.append(node)
+          if not nodes:
+              raise SystemExit('career-heading legacy HFT bold sample not found')
+          for node in nodes:
+              if 'stroke-width="0.16"' not in node:
+                  raise SystemExit('legacy HFT bold is missing fill+stroke paint')
+              if 'font-weight="bold"' in node:
+                  raise SystemExit('legacy HFT bold still asks for synthetic/separate bold face')
+          print('OK legacy HFT bold brackets use Regular fill+stroke:', len(nodes))
+          PY
+
       - name: Upload smoke-test artifact
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rhwp-kice09-composite-pages
+          name: rhwp-kice09-hft-native-pages
           path: |
             out/**
+            fresh_ttf/*.ttf
+            fresh_ttf/*_manifest.json
+            hft-source-audit.txt
+            fresh-build.log
+            integrated-quote-placement.txt
+            runtime-font-metric-gen.txt
+            svg-diagnostics.txt
             rhwp-capabilities.json
+            rhwp-src/src/renderer/font_metrics_data.rs
           if-no-files-found: error
           compression-level: 0

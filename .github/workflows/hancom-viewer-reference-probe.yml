@@ -1,0 +1,125 @@
+name: Hancom viewer reference render probe
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/hancom-viewer-reference-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download reference HWP and official Hancom viewer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 -A 'Mozilla/5.0' -e 'https://legendstudy.com/223' \
+            'https://t1.daumcdn.net/cfile/tistory/262D61365269C48115' -o input.hwp
+          echo '59af2533f5a12fee6685f9c9f3b8a646a54997badaba3c062138c7d04f5e6205  input.hwp' | sha256sum -c -
+          curl -L --fail --retry 3 -H 'Referer: https://www.hancom.com/' -A 'Mozilla/5.0' \
+            'https://cdn.hancom.com/pds/hnc/VIE/hancomoffice-hwpviewer-Ubuntu-amd64.deb' -o hancom-viewer.deb
+          mkdir hancom-root
+          dpkg-deb -x hancom-viewer.deb hancom-root
+
+      - name: Inventory viewer entry points and dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '=== DESKTOP EXEC LINES ==='
+            grep -Rhs '^Exec=' hancom-root/usr/share/applications hancom-root/opt 2>/dev/null || true
+            echo
+            echo '=== EXECUTABLE CANDIDATES ==='
+            find hancom-root -type f -perm /111 -print 2>/dev/null | grep -Ei '(hwp|viewer|hoffice|hancom)' | sort || true
+            echo
+            echo '=== PACKAGE DEPENDS ==='
+            dpkg-deb -f hancom-viewer.deb Depends || true
+          } | tee viewer-inventory.txt
+
+          BIN=$(find hancom-root -type f -perm /111 -print 2>/dev/null | grep -Ei '/(hwpviewer|hwpviewer-bin|hwpviewerlauncher|hwpviewer[^/]*)$' | head -n1 || true)
+          if [ -z "$BIN" ]; then
+            BIN=$(find hancom-root -type f -perm /111 -print 2>/dev/null | grep -Ei '(hwp|viewer|hoffice|hancom)' | head -n1 || true)
+          fi
+          echo "$BIN" | tee viewer-bin.txt
+          test -n "$BIN"
+          file "$BIN" | tee viewer-file.txt
+          ldd "$BIN" 2>&1 | tee viewer-ldd.txt || true
+
+      - name: Install headless GUI diagnostics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb x11-utils xdotool imagemagick libgl1 libglu1-mesa libxkbcommon-x11-0 libxcb-xinerama0 libxcb-cursor0
+
+      - name: Probe command line and launch official viewer under Xvfb
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=$(cat viewer-bin.txt)
+          ROOT="$GITHUB_WORKSPACE/hancom-root"
+          mkdir -p out
+
+          # Preserve the package's own runtime libraries before system libraries.
+          LIBS=$(find "$ROOT" -type f \( -name '*.so' -o -name '*.so.*' \) -printf '%h\n' | sort -u | paste -sd: -)
+          export LD_LIBRARY_PATH="$LIBS:${LD_LIBRARY_PATH:-}"
+
+          for ARG in '--help' '-h' '--version'; do
+            echo "=== $ARG ===" >> out/cli-probe.txt
+            timeout 8s xvfb-run -a "$BIN" "$ARG" >> out/cli-probe.txt 2>&1 || true
+          done
+
+          Xvfb :99 -screen 0 1920x1440x24 -nolisten tcp >out/xvfb.log 2>&1 &
+          XVFB_PID=$!
+          export DISPLAY=:99
+          sleep 2
+
+          "$BIN" "$GITHUB_WORKSPACE/input.hwp" >out/viewer.stdout.txt 2>out/viewer.stderr.txt &
+          VIEWER_PID=$!
+
+          # Wait for an actual top-level window rather than assuming a startup delay.
+          WINDOW=''
+          for i in $(seq 1 30); do
+            WINDOW=$(xdotool search --onlyvisible --name '.' 2>/dev/null | tail -n1 || true)
+            [ -n "$WINDOW" ] && break
+            sleep 1
+          done
+          echo "viewer_pid=$VIEWER_PID window=$WINDOW" | tee out/launch-status.txt
+          xdotool search --onlyvisible --name '.' getwindowname %@ > out/window-titles.txt 2>&1 || true
+
+          # A screenshot is sufficient for this probe; no proprietary viewer files are uploaded.
+          import -window root out/hancom-reference-screen.png 2>out/screenshot.err || true
+
+          # Capture subsequent pages if the viewer accepted the HWP and has focus.
+          if [ -n "$WINDOW" ]; then
+            xdotool windowactivate --sync "$WINDOW" || true
+            for p in 2 3 4 5; do
+              xdotool key --window "$WINDOW" Page_Down || true
+              sleep 1
+              import -window root "out/hancom-reference-screen-p${p}.png" 2>>out/screenshot.err || true
+            done
+          fi
+
+          kill "$VIEWER_PID" 2>/dev/null || true
+          kill "$XVFB_PID" 2>/dev/null || true
+
+      - name: Upload reference-render diagnostics
+        uses: actions/upload-artifact@v7
+        with:
+          name: hancom-reference-render-probe
+          path: |
+            viewer-inventory.txt
+            viewer-bin.txt
+            viewer-file.txt
+            viewer-ldd.txt
+            out/**
+          if-no-files-found: error
+          compression-level: 0

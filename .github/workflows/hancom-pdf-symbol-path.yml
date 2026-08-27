@@ -1,0 +1,99 @@
+name: Hancom PDF symbol path audit
+
+on:
+  push:
+    branches: [rhwp-smoke-20260825]
+    paths:
+      - '.github/workflows/hancom-pdf-symbol-path.yml'
+  pull_request:
+    branches: [main, rhwp-ci-base]
+    paths:
+      - '.github/workflows/hancom-pdf-symbol-path.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download and extract official viewer
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 \
+            -H 'Referer: https://www.hancom.com/' \
+            -A 'Mozilla/5.0' \
+            'https://cdn.hancom.com/pds/hnc/VIE/hancomoffice-hwpviewer-Ubuntu-amd64.deb' \
+            -o viewer.deb
+          mkdir deb
+          cd deb
+          ar x ../viewer.deb
+          tar -xf data.tar.*
+          cd ..
+          test -x deb/usr/bin/hwpviewer
+
+      - name: Identify PDF Type3 producer and outline fitting calls
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=deb/usr/bin/hwpviewer
+          OUT=hancom-pdf-symbol-path.txt
+          : > "$OUT"
+
+          echo '=== EXPORTED OUTLINE / WIDTH / PDF-LIKE SYMBOLS ===' >> "$OUT"
+          nm -D -C "$BIN" 2>/dev/null \
+            | grep -Ei 'GetOlBitmap|HncGetFontOutline|HFTGetGlyphOutline|HFTGetCharWidth|GetFontWidth|GetFontEMSize|PDF|Type3|CharProc|FontMatrix|Print|GlyphOutline|FontOutline' \
+            | head -n 1200 >> "$OUT" || true
+          echo >> "$OUT"
+
+          echo '=== DIRECT STRING HITS IN HWPVIEWER ===' >> "$OUT"
+          strings -a "$BIN" \
+            | grep -Ei 'Type3|CharProcs|FontMatrix|FontBBox|ToUnicode|/Widths|PDF|d0|d1|GetOlBitmap|HncGetFontOutline' \
+            | head -n 1500 >> "$OUT" || true
+          echo >> "$OUT"
+
+          echo '=== PACKAGE FILES CONTAINING TYPE3/CHARPROCS/FONTMATRIX ===' >> "$OUT"
+          while IFS= read -r -d '' f; do
+            size=$(stat -c%s "$f" 2>/dev/null || echo 0)
+            [ "$size" -le 250000000 ] || continue
+            if grep -a -q -E 'CharProcs|FontMatrix|/Subtype[[:space:]]*/Type3|Type3' "$f" 2>/dev/null; then
+              echo "FILE $f size=$size type=$(file -b "$f")" >> "$OUT"
+              strings -a "$f" | grep -Ei 'Type3|CharProcs|FontMatrix|FontBBox|ToUnicode|PDF|Widths' | head -n 100 >> "$OUT" || true
+            fi
+          done < <(find deb/usr -type f -print0)
+          echo >> "$OUT"
+
+          echo '=== HncGetFontOutline / GetOlBitmap DISASSEMBLY ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn --disassemble=HncGetFontOutline "$BIN" >> "$OUT" 2>&1 || true
+          objdump -d -C --no-show-raw-insn --disassemble='_Z11GetOlBitmapP11TypefaceDestiiiiPiP8CharFontS2_PFiPciE' "$BIN" >> "$OUT" 2>&1 || true
+          objdump -d -C --no-show-raw-insn --disassemble='GetOlBitmap(TypefaceDes*, unsigned short, int, int, int, int*, CharFont*, int*, int (*)(char*, int))' "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
+
+          echo '=== EXACT ADDRESS RANGES ===' >> "$OUT"
+          # Known from prior symbol audit: HncGetFontOutline 0x179c3d0, GetOlBitmap 0x17a3270.
+          objdump -d -C --no-show-raw-insn --start-address=0x179c3d0 --stop-address=0x179c850 "$BIN" >> "$OUT" 2>&1 || true
+          objdump -d -C --no-show-raw-insn --start-address=0x17a3270 --stop-address=0x17a3900 "$BIN" >> "$OUT" 2>&1 || true
+          echo >> "$OUT"
+
+          echo '=== CALL SITES: OUTLINE AND WIDTH ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn "$BIN" 2>/dev/null \
+            | grep -E -B 16 -A 24 'call.*<(HncGetFontOutline|GetOlBitmap|HFTGetGlyphOutline|HFTGetCharWidth|GetFontWidth)' \
+            | head -n 6000 >> "$OUT" || true
+          echo >> "$OUT"
+
+          echo '=== CALLS TO ABSOLUTE OUTLINE/WIDTH ADDRESSES ===' >> "$OUT"
+          objdump -d -C --no-show-raw-insn "$BIN" 2>/dev/null \
+            | grep -E -B 18 -A 30 'call.*(179c3d0|17a3270|17dc1b0|17dc280|179ad30)' \
+            | head -n 7000 >> "$OUT" || true
+
+          cat "$OUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hancom-pdf-symbol-path
+          path: hancom-pdf-symbol-path.txt
+          if-no-files-found: error
