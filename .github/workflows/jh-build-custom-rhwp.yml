@@ -6,8 +6,6 @@ on:
     paths:
       - '.github/workflows/jh-build-custom-rhwp.yml'
       - 'rhwp/custom/src/renderer/font_metrics_data.rs'
-      - 'tools/patch_rhwp_hft_native.py'
-      - 'tools/patch_rhwp_hft_synthetic_bold.py'
       - 'tools/patch_rhwp_missing_textbox_lineseg.py'
 
 permissions:
@@ -25,8 +23,10 @@ jobs:
         run: |
           git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
           cp rhwp/custom/src/renderer/font_metrics_data.rs rhwp-src/src/renderer/font_metrics_data.rs
-          python tools/patch_rhwp_hft_native.py rhwp-src
-          python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
+          curl -fsSL https://raw.githubusercontent.com/3lown4way/hft-to-ttf/rhwp-smoke-20260825/tools/patch_rhwp_hft_native.py -o /tmp/patch_rhwp_hft_native.py
+          curl -fsSL https://raw.githubusercontent.com/3lown4way/hft-to-ttf/rhwp-smoke-20260825/tools/patch_rhwp_hft_synthetic_bold.py -o /tmp/patch_rhwp_hft_synthetic_bold.py
+          python /tmp/patch_rhwp_hft_native.py rhwp-src
+          python /tmp/patch_rhwp_hft_synthetic_bold.py rhwp-src
           python tools/patch_rhwp_missing_textbox_lineseg.py rhwp-src
 
       - name: Install native Skia font dependencies
