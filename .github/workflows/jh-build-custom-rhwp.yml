@@ -26,6 +26,15 @@ jobs:
       - name: Build recovered custom rhwp
         working-directory: rhwp/custom
         run: |
+          # The recovered source snapshot intentionally omits auxiliary workspace tools.
+          # Build the primary rhwp package as a single-member workspace.
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('Cargo.toml')
+          s=p.read_text()
+          s=s.replace('members = [".", "tools/rhwp-subsecond", "bindings/Native", "tools/batch-convert"]','members = ["."]')
+          p.write_text(s)
+          PY
           cargo build --release --features native-skia --bin rhwp
           ./target/release/rhwp capabilities > ../../jh-rhwp-capabilities.json
           sha256sum ./target/release/rhwp > ../../jh-rhwp-sha256.txt
