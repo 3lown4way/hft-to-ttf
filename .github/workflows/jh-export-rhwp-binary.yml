@@ -1,0 +1,42 @@
+name: JH export rhwp binary
+
+on:
+  push:
+    branches: [jh-rhwp-binary-20260828]
+    paths:
+      - '.github/workflows/jh-export-rhwp-binary.yml'
+      - 'tools/patch_rhwp_hft_native.py'
+      - 'tools/patch_rhwp_hft_synthetic_bold.py'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build exact JH custom rhwp
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
+          python tools/patch_rhwp_hft_native.py rhwp-src
+          python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
+          sudo apt-get update
+          sudo apt-get install -y libfreetype6-dev libfontconfig1-dev
+          cd rhwp-src
+          cargo build --release --features native-skia --bin rhwp
+          ./target/release/rhwp capabilities > ../rhwp-capabilities.json
+          sha256sum ./target/release/rhwp > ../rhwp-sha256.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jh-rhwp-v0.8.4-native-skia
+          path: |
+            rhwp-src/target/release/rhwp
+            rhwp-capabilities.json
+            rhwp-sha256.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
