@@ -5,7 +5,9 @@ on:
     branches: [jh-render-20260828]
     paths:
       - '.github/workflows/jh-build-custom-rhwp.yml'
-      - 'rhwp/custom/**'
+      - 'rhwp/custom/src/renderer/font_metrics_data.rs'
+      - 'tools/patch_rhwp_hft_native.py'
+      - 'tools/patch_rhwp_hft_synthetic_bold.py'
 
 permissions:
   contents: read
@@ -13,38 +15,36 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 50
     steps:
-      - name: Checkout
+      - name: Checkout font repo
         uses: actions/checkout@v7
+
+      - name: Reconstruct pinned rhwp v0.8.4 with JH overlays
+        run: |
+          git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
+          cp rhwp/custom/src/renderer/font_metrics_data.rs rhwp-src/src/renderer/font_metrics_data.rs
+          python tools/patch_rhwp_hft_native.py rhwp-src
+          python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
 
       - name: Install native Skia font dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libfreetype6-dev libfontconfig1-dev
 
-      - name: Build recovered custom rhwp
-        working-directory: rhwp/custom
+      - name: Build recovered JH rhwp
+        working-directory: rhwp-src
         run: |
-          # The recovered source snapshot intentionally omits auxiliary workspace tools.
-          # Build the primary rhwp package as a single-member workspace.
-          python - <<'PY'
-          from pathlib import Path
-          p=Path('Cargo.toml')
-          s=p.read_text()
-          s=s.replace('members = [".", "tools/rhwp-subsecond", "bindings/Native", "tools/batch-convert"]','members = ["."]')
-          p.write_text(s)
-          PY
           cargo build --release --features native-skia --bin rhwp
-          ./target/release/rhwp capabilities > ../../jh-rhwp-capabilities.json
-          sha256sum ./target/release/rhwp > ../../jh-rhwp-sha256.txt
+          ./target/release/rhwp capabilities > ../jh-rhwp-capabilities.json
+          sha256sum ./target/release/rhwp > ../jh-rhwp-sha256.txt
 
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
           name: jh-custom-rhwp-linux-x86_64
           path: |
-            rhwp/custom/target/release/rhwp
+            rhwp-src/target/release/rhwp
             jh-rhwp-capabilities.json
             jh-rhwp-sha256.txt
           if-no-files-found: error
