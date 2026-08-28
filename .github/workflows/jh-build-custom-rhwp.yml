@@ -2,12 +2,13 @@ name: JH build custom rhwp binary
 
 on:
   push:
-    branches: [jh-render-20260828]
+    branches: [jh-fix-inline-textbox-lineseg-20260828]
     paths:
       - '.github/workflows/jh-build-custom-rhwp.yml'
       - 'rhwp/custom/src/renderer/font_metrics_data.rs'
       - 'tools/patch_rhwp_hft_native.py'
       - 'tools/patch_rhwp_hft_synthetic_bold.py'
+      - 'tools/patch_rhwp_missing_textbox_lineseg.py'
 
 permissions:
   contents: read
@@ -26,6 +27,7 @@ jobs:
           cp rhwp/custom/src/renderer/font_metrics_data.rs rhwp-src/src/renderer/font_metrics_data.rs
           python tools/patch_rhwp_hft_native.py rhwp-src
           python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
+          python tools/patch_rhwp_missing_textbox_lineseg.py rhwp-src
 
       - name: Install native Skia font dependencies
         run: |
