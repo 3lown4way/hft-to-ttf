@@ -1,0 +1,43 @@
+name: JH build custom rhwp binary
+
+on:
+  push:
+    branches: [jh-render-20260828]
+    paths:
+      - '.github/workflows/jh-build-custom-rhwp.yml'
+      - 'rhwp/custom/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install native Skia font dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfreetype6-dev libfontconfig1-dev
+
+      - name: Build recovered custom rhwp
+        working-directory: rhwp/custom
+        run: |
+          cargo build --release --features native-skia --bin rhwp
+          ./target/release/rhwp capabilities > ../../jh-rhwp-capabilities.json
+          sha256sum ./target/release/rhwp > ../../jh-rhwp-sha256.txt
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: jh-custom-rhwp-linux-x86_64
+          path: |
+            rhwp/custom/target/release/rhwp
+            jh-rhwp-capabilities.json
+            jh-rhwp-sha256.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
