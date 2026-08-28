@@ -1,0 +1,68 @@
+name: JH package runtime fonts
+
+on:
+  push:
+    branches: [jh-fix-inline-textbox-lineseg-20260828]
+    paths:
+      - '.github/workflows/jh-upload-runtime-fonts.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prepare quote-fixed runtime TTFs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python -m pip install --quiet fonttools
+          rm -rf runtime_fonts
+          mkdir runtime_fonts
+          python - <<'PY'
+          from pathlib import Path
+          from fontTools.ttLib import TTFont
+          import shutil
+
+          targets = {
+              '신명 중명조',
+              '신명 중명조 - 한양영문',
+              '신명 중명조 - 한양문자',
+              '신명 중고딕 - 혼합',
+          }
+          widths = {'‘': 230, '’': 230, '“': 441, '”': 441}
+          changed=[]
+          for i,p in enumerate(sorted(Path('output_ttf').glob('*.ttf')),1):
+              out=Path('runtime_fonts')/p.name
+              shutil.copy2(p,out)
+              f=TTFont(out)
+              family=next((n.toUnicode() for n in f['name'].names if n.nameID==1),'')
+              if family in targets:
+                  cmap=f.getBestCmap() or {}
+                  for ch,adv in widths.items():
+                      g=cmap.get(ord(ch))
+                      if not g:
+                          raise SystemExit(f'{family}: missing {ch}')
+                      old,lsb=f['hmtx'].metrics[g]
+                      f['hmtx'].metrics[g]=(adv,lsb)
+                      print('QUOTE_METRIC',family,ch,old,'->',adv,'lsb',lsb)
+                  changed.append(family)
+              ps=f'KICE09QUOTE{i:02d}-Regular'
+              for n in f['name'].names:
+                  if n.nameID==6:
+                      n.string=ps.encode('utf-16-be') if n.isUnicode() else ps.encode('latin1')
+              f.save(out)
+          if set(changed)!=targets:
+              raise SystemExit(f'wrong changed family set: {changed!r}')
+          print('runtime fonts',len(list(Path('runtime_fonts').glob('*.ttf'))))
+          PY
+      - name: Upload runtime font bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: jh-runtime-fonts-quote-fixed
+          path: runtime_fonts/*.ttf
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
