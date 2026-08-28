@@ -2,36 +2,36 @@
 """Patch rhwp table-cell rendering for paragraphs with no PARA_LINE_SEG.
 
 Hancom/Polaris reflow a table-cell paragraph when HWP5 omits PARA_LINE_SEG,
-using the cell's real text area. rhwp already knows how to synthesize lines for
-that case, but two rendering paths can diverge:
+using the cell's real text area. rhwp's initial compose_paragraph() fallback is
+one long line; it is not evidence that the cell padding should be reduced.
 
-1. the full/embedded-table path can keep compose_paragraph()'s one-line fallback;
-2. the partial-table path can misread that fallback as a true overflow and shrink
-   the cell's left/right padding to the 1 px safety minimum before reflow.
-
-The second case is exactly what happens in the KICE-style 12번 <보기>: source
-cell width 30615 HU with 850/850 HU horizontal cell margins should reflow at
-28915 HU = 385.53 px (96 dpi). The overflow-shrink path instead expands the
-usable width to about 406.20 px, changing the first line from
+In the KICE-style question 12 <보기>, the source cell is 30615 HU wide with
+850/850 HU horizontal margins, so Hancom lays the text at 28915 HU = 385.53 px
+(96 dpi). If rhwp runs its generic overflow-padding shrink before the no-LineSeg
+reflow, the margins collapse to the 1 px safety minimum and the reflow width
+becomes about 406.20 px. That changes the line ending from
 `...슬롯을 항공|사에...` to `...슬롯을 항공사에|...`.
 
-Compatibility scope is deliberately narrow:
-- horizontal cell
-- visible paragraph text
-- no stored LineSeg
-- no nested controls in that paragraph
-Stored-LineSeg cells and ordinary overflow handling remain untouched.
+The core rule below is deliberately structural: a visible, control-free cell
+paragraph without stored LineSeg must be reflowed at the source cell text area
+before overflow can be judged. Stored-LineSeg cells and genuine overflow cells
+keep the existing behavior.
 """
 from pathlib import Path
 import sys
 
 
-def missing_lineseg_expr(var: str = "para") -> str:
-    return (
-        f"{var}.line_segs.is_empty()\\n"
-        f"                        && {var}.text.chars().any(|ch| !ch.is_whitespace())\\n"
-        f"                        && {var}.controls.is_empty()"
-    )
+def patch_core_padding_guard(root: Path) -> None:
+    target = root / "src/renderer/composer.rs"
+    text = target.read_text(encoding="utf-8")
+    old = '''    if preserve_cell_padding {\n        return (pad_left, pad_right);\n    }\n\n    // [Task #617] 다중 줄(2 줄 이상) 단락이 line_segs 로 분배 완료된 경우,\n'''
+    new = '''    if preserve_cell_padding {\n        return (pad_left, pad_right);\n    }\n\n    // Missing PARA_LINE_SEG의 compose 결과는 아직 셀 가용 폭으로 조판되기\n    // 전의 단일 fallback line이다. 그 자연폭을 실제 overflow로 판단해 셀\n    // padding을 축소하면 이후 recompose가 잘못 넓어진 text area를 사용한다.\n    // 저장 LineSeg가 없는 가시 텍스트 문단은 source padding을 보존한 채 먼저\n    // reflow해야 하므로 이 단계의 overflow-padding shrink를 건너뛴다.\n    let has_unlaid_out_cell_text = paragraphs.iter().any(|para| {\n        para.line_segs.is_empty()\n            && para.text.chars().any(|ch| !ch.is_whitespace())\n            && para.controls.is_empty()\n    });\n    if has_unlaid_out_cell_text {\n        return (pad_left, pad_right);\n    }\n\n    // [Task #617] 다중 줄(2 줄 이상) 단락이 line_segs 로 분배 완료된 경우,\n'''
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f"core padding guard: expected one anchor, found {count}")
+    text = text.replace(old, new, 1)
+    target.write_text(text, encoding="utf-8")
+    print(f"patched {target}")
 
 
 def patch_full_embedded(root: Path) -> None:
@@ -61,7 +61,7 @@ def patch_partial(root: Path) -> None:
     text = target.read_text(encoding="utf-8")
 
     old = '''                // 텍스트 오버플로우 시 좌우 패딩 축소\n                let (new_pl, new_pr) = self.shrink_cell_padding_for_overflow(\n                    pad_left,\n                    pad_right,\n                    cell_w,\n                    &composed_paras,\n                    &cell.paragraphs,\n                    styles,\n                    cell.apply_inner_margin,\n                );\n'''
-    new = '''                // Missing PARA_LINE_SEG의 compose_paragraph() 결과는 아직 실제\n                // 셀 폭으로 재조판되기 전의 단일 fallback line이다. 그 자연폭을\n                // 진짜 overflow로 해석해 padding을 1px까지 깎으면, 바로 아래\n                // recompose_for_cell_width()가 잘못 넓어진 폭을 받는다. 이 경우에만\n                // source에서 해소된 셀 padding을 보존하고 그 폭으로 먼저 재조판한다.\n                let preserve_missing_lineseg_padding = cell.text_direction == 0\n                    && cell.paragraphs.iter().any(|para| {\n                        para.line_segs.is_empty()\n                            && para.text.chars().any(|ch| !ch.is_whitespace())\n                            && para.controls.is_empty()\n                    });\n                // 텍스트 오버플로우 시 좌우 패딩 축소\n                let (new_pl, new_pr) = self.shrink_cell_padding_for_overflow(\n                    pad_left,\n                    pad_right,\n                    cell_w,\n                    &composed_paras,\n                    &cell.paragraphs,\n                    styles,\n                    cell.apply_inner_margin || preserve_missing_lineseg_padding,\n                );\n'''
+    new = '''                let preserve_missing_lineseg_padding = cell.text_direction == 0\n                    && cell.paragraphs.iter().any(|para| {\n                        para.line_segs.is_empty()\n                            && para.text.chars().any(|ch| !ch.is_whitespace())\n                            && para.controls.is_empty()\n                    });\n                // 텍스트 오버플로우 시 좌우 패딩 축소\n                let (new_pl, new_pr) = self.shrink_cell_padding_for_overflow(\n                    pad_left,\n                    pad_right,\n                    cell_w,\n                    &composed_paras,\n                    &cell.paragraphs,\n                    styles,\n                    cell.apply_inner_margin || preserve_missing_lineseg_padding,\n                );\n'''
     count = text.count(old)
     if count != 1:
         raise SystemExit(f"partial path: expected one shrink block, found {count}")
@@ -75,6 +75,7 @@ def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("usage: patch_rhwp_missing_tablecell_lineseg.py <rhwp-source-root>")
     root = Path(sys.argv[1])
+    patch_core_padding_guard(root)
     patch_full_embedded(root)
     patch_partial(root)
 
