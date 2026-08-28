@@ -1,4 +1,4 @@
-name: JH export clean rhwp binary
+name: JH export modern-template rhwp binary
 
 on:
   push:
@@ -15,11 +15,16 @@ jobs:
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
-      - name: Build clean upstream rhwp v0.8.4 native Skia
+      - name: Build upstream rhwp with Unicode HFT font loading only
         shell: bash
         run: |
           set -euxo pipefail
           git clone --depth 1 --branch v0.8.4 https://github.com/edwardkim/rhwp.git rhwp-src
+          # IMPORTANT: do NOT apply patch_rhwp_hft_native.py here. That patch
+          # contains the KICE09 charPr-id bridge and must never remap the modern
+          # evaluation template's charPr table. Keep only source-HFT font aliases
+          # / legacy HFT outline rendering support.
+          python tools/patch_rhwp_hft_synthetic_bold.py rhwp-src
           sudo apt-get update
           sudo apt-get install -y libfreetype6-dev libfontconfig1-dev
           cd rhwp-src
@@ -28,7 +33,7 @@ jobs:
           sha256sum ./target/release/rhwp > ../rhwp-sha256.txt
       - uses: actions/upload-artifact@v7
         with:
-          name: jh-rhwp-v0.8.4-clean-native-skia
+          name: jh-rhwp-v0.8.4-modern-hft-native-skia
           path: |
             rhwp-src/target/release/rhwp
             rhwp-capabilities.json
