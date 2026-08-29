@@ -88,6 +88,10 @@ jobs:
             --combo ${{ matrix.combo }} `
             --outdir combo_out
 
+      - name: Normalize font name IDs
+        shell: pwsh
+        run: python scripts/normalize_name_table.py combo_out
+
       - name: Validate combo TTF
         shell: pwsh
         run: python scripts/validate_ttf.py combo_out
