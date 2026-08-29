@@ -15,7 +15,7 @@ failed = []
 for path in fonts:
     try:
         f = TTFont(path, lazy=False)
-        required = {'head', 'hhea', 'maxp', 'cmap', 'name'}
+        required = {'head', 'hhea', 'maxp', 'cmap', 'name', 'OS/2'}
         missing = required.difference(f.keys())
         if missing:
             raise ValueError('missing tables: ' + ', '.join(sorted(missing)))
@@ -25,7 +25,10 @@ for path in fonts:
         best_cmap = f.getBestCmap() or {}
         if not best_cmap:
             raise ValueError('empty Unicode cmap')
-        print(f'OK  {path}  glyphs={glyphs}  cmap={len(best_cmap)}')
+        fs_type = int(f['OS/2'].fsType)
+        if fs_type != 0:
+            raise ValueError(f'unexpected OS/2.fsType=0x{fs_type:04X}; expected 0x0000')
+        print(f'OK  {path}  glyphs={glyphs}  cmap={len(best_cmap)}  fsType=0x{fs_type:04X}')
         f.close()
     except Exception as e:
         failed.append((path, e))
