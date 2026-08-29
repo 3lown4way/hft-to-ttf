@@ -30,7 +30,28 @@ for path in fonts:
         if fs_type != 0:
             raise ValueError(f'unexpected OS/2.fsType=0x{fs_type:04X}; expected 0x0000')
 
-        ps_values = sorted({n.toUnicode() for n in f['name'].names if n.nameID == 6})
+        def values(name_id: int):
+            return sorted({n.toUnicode() for n in f['name'].names if n.nameID == name_id})
+
+        family_values = values(1)
+        full_values = values(4)
+        typo_family_values = values(16)
+        style_values = values(2)
+        typo_style_values = values(17)
+        ps_values = values(6)
+
+        if len(family_values) != 1:
+            raise ValueError(f'expected one nameID 1 family, found {family_values!r}')
+        family = family_values[0]
+        if full_values != [family]:
+            raise ValueError(f'nameID 4 must equal family {family!r}, found {full_values!r}')
+        if typo_family_values != [family]:
+            raise ValueError(f'nameID 16 must equal family {family!r}, found {typo_family_values!r}')
+        if style_values != ['Regular']:
+            raise ValueError(f'nameID 2 must be Regular, found {style_values!r}')
+        if typo_style_values != ['Regular']:
+            raise ValueError(f'nameID 17 must be Regular, found {typo_style_values!r}')
+
         if len(ps_values) != 1:
             raise ValueError(f'expected one PostScript name, found {ps_values!r}')
         ps_name = ps_values[0]
@@ -40,9 +61,14 @@ for path in fonts:
             raise ValueError(f'PostScript name is not ASCII: {ps_name!r}')
         if len(ps_bytes) > 63:
             raise ValueError(f'PostScript name exceeds 63 bytes: {ps_name!r}')
+        if 'KICEHFTComposite' in ps_name:
+            raise ValueError(f'stale common PostScript identity remains: {ps_name!r}')
         postscript_names.setdefault(ps_name, []).append(path)
 
-        print(f'OK  {path}  glyphs={glyphs}  cmap={len(best_cmap)}  fsType=0x{fs_type:04X}  psName={ps_name}')
+        print(
+            f'OK  {path}  glyphs={glyphs}  cmap={len(best_cmap)}  '
+            f'fsType=0x{fs_type:04X}  family={family!r}  psName={ps_name}'
+        )
         f.close()
     except Exception as e:
         failed.append((path, e))
@@ -56,4 +82,4 @@ for ps_name, paths in sorted(postscript_names.items()):
 
 if failed:
     raise SystemExit(f'{len(failed)} invalid TTF issue(s).')
-print(f'Validated {len(fonts)} TTF file(s); PostScript names are unique.')
+print(f'Validated {len(fonts)} TTF file(s); nameIDs and PostScript names are unique.')
