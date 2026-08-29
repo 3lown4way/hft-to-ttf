@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import argparse
+import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +17,23 @@ from hft_core_v34 import TARGET_UPEM, iter_unicode_glyphs
 # NOTE: use this only where the source font license permits installable/editable
 # embedding; fsType is a licensing/embedding permission field, not a render flag.
 DEFAULT_FS_TYPE = 0x0000
+
+
+def _postscript_stem(family: str) -> str:
+    """Return a stable, unique ASCII PostScript-family stem.
+
+    Most KICE families are entirely Korean. The previous implementation removed
+    all non-ASCII characters and therefore gave *every* such font the same
+    nameID 6: `KICEHFTComposite-Regular`. Font registries commonly key fonts by
+    PostScript name, so Hancom Docs treated the 13 TTFs as duplicates and exposed
+    only one of them. Use readable ASCII when available; otherwise derive a short
+    deterministic identifier from the Unicode family name.
+    """
+    ascii_stem = "".join(c for c in family if c.isascii() and c.isalnum())
+    if ascii_stem:
+        return ascii_stem[:40]
+    digest = hashlib.sha1(family.encode("utf-8")).hexdigest()[:12].upper()
+    return f"KICEHFT{digest}"
 
 
 def build(
@@ -110,13 +128,14 @@ def build(
         usWeightClass=weight, usWidthClass=5,
         fsType=fs_type,
     )
-    ps = "".join(c for c in family if c.isascii() and c.isalnum()) or "KICEHFTComposite"
+    ps = _postscript_stem(family)
+    ps_name = f"{ps}-{style.replace(' ', '')}"
     fb.setupNameTable({
         "familyName": family,
         "styleName": style,
         "uniqueFontIdentifier": f"{family} {style} HFT v3.4 local reconstruction",
         "fullName": f"{family} {style}",
-        "psName": f"{ps}-{style.replace(' ', '')}",
+        "psName": ps_name,
         "version": "Version 0.3.4 local HFT reconstruction",
     })
     fb.setupPost()
