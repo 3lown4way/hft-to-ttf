@@ -10,6 +10,7 @@ on:
       - 'tools/patch_rhwp_missing_tablecell_lineseg.py'
       - 'tools/patch_rhwp_runtime_hft_families.py'
       - 'tools/patch_rhwp_embedded_space_metric.py'
+      - 'tools/patch_rhwp_inline_tac_shape_reflow.py'
 
 permissions:
   contents: read
@@ -32,6 +33,7 @@ jobs:
           python /tmp/patch_rhwp_hft_synthetic_bold.py rhwp-src
           python tools/patch_rhwp_runtime_hft_families.py rhwp-src
           python tools/patch_rhwp_embedded_space_metric.py rhwp-src
+          python tools/patch_rhwp_inline_tac_shape_reflow.py rhwp-src
           python tools/patch_rhwp_missing_textbox_lineseg.py rhwp-src
           python tools/patch_rhwp_missing_tablecell_lineseg.py rhwp-src
 
