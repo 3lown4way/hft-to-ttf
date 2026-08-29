@@ -10,6 +10,14 @@ from fontTools.pens.ttGlyphPen import TTGlyphPen
 from hft_core_v34 import TARGET_UPEM, iter_unicode_glyphs
 
 
+# fontTools FontBuilder.setupOS2() defaults fsType to 0x0004 (Preview & Print).
+# These locally reconstructed TTFs are used as editable runtime/user fonts, so
+# make the intended value explicit instead of inheriting that unrelated default.
+# NOTE: use this only where the source font license permits installable/editable
+# embedding; fsType is a licensing/embedding permission field, not a render flag.
+DEFAULT_FS_TYPE = 0x0000
+
+
 def build(
     sources,
     out: Path,
@@ -18,12 +26,17 @@ def build(
     bold_metric_adjust: bool = False,
     source_code_overrides: Optional[dict[str, dict[int, str]]] = None,
     source_code_aliases: Optional[dict[str, dict[int, list[str]]]] = None,
+    fs_type: int = DEFAULT_FS_TYPE,
 ):
     """Build a local composite TTF from script-specific HFT sources.
 
     `source_code_overrides` and `source_code_aliases` are keyed by source
     basename (case-insensitive). They are intended for document-specific
     legacy-code bindings, not universal HNC mappings.
+
+    `fs_type` is written to OS/2.fsType explicitly. The default 0 means
+    installable embedding and must only be used when the source-font license
+    permits it.
     """
     source_code_overrides = {k.upper(): v for k, v in (source_code_overrides or {}).items()}
     source_code_aliases = {k.upper(): v for k, v in (source_code_aliases or {}).items()}
@@ -95,6 +108,7 @@ def build(
         usWinAscent=820, usWinDescent=220,
         sxHeight=500, sCapHeight=700,
         usWeightClass=weight, usWidthClass=5,
+        fsType=fs_type,
     )
     ps = "".join(c for c in family if c.isascii() and c.isalnum()) or "KICEHFTComposite"
     fb.setupNameTable({
@@ -135,6 +149,8 @@ def main():
     ap.add_argument("--name", required=True)
     ap.add_argument("--style", default="Regular")
     ap.add_argument("--bold-metric-adjust", action="store_true")
+    ap.add_argument("--fs-type", type=lambda s: int(s, 0), default=DEFAULT_FS_TYPE,
+                    help="OS/2.fsType embedding flags (default: 0/installable; use only if the source license permits)")
     ap.add_argument("--out", required=True, type=Path)
     a = ap.parse_args()
     sources = [(k.upper(), p) for k, p in (
@@ -156,8 +172,9 @@ def main():
         sources, a.out, a.name, a.style, a.bold_metric_adjust,
         source_code_overrides=overrides,
         source_code_aliases=aliases,
+        fs_type=a.fs_type,
     )
-    print(f"built {a.out} / cmap={n}")
+    print(f"built {a.out} / cmap={n} / fsType=0x{a.fs_type:04X}")
 
 
 if __name__ == "__main__":
