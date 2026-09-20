@@ -1,0 +1,114 @@
+name: KICE rhwp 0.8.6 isolated verification
+on:
+  push:
+    branches:
+      - jh/kice-rhwp086-actions-20260920
+    paths:
+      - '.github/workflows/kice-rhwp086-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-and-smoke-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    steps:
+      - name: Checkout owner's font-and-metric repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.93.1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.1'
+
+      - name: Get rhwp v0.8.6 in isolated directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --depth 1 --branch v0.8.6 --single-branch --no-checkout https://github.com/edwardkim/rhwp.git /tmp/rhwp086
+          git -C /tmp/rhwp086 sparse-checkout init --cone
+          git -C /tmp/rhwp086 sparse-checkout set src crates ttfs/opensource .cargo
+          git -C /tmp/rhwp086 checkout v0.8.6
+          grep -m1 '^version = "0.8.6"' /tmp/rhwp086/Cargo.toml
+
+      - name: Port preserved KICE metrics without overwriting upstream metrics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root=Path('/tmp/rhwp086/src/renderer')
+          previous=Path('rhwp/custom/src/renderer/font_metrics_data.rs').read_text(encoding='utf-8')
+          current=(root/'font_metrics_data.rs').read_text(encoding='utf-8')
+          assert (root/'font_metrics_generated.rs').is_file()
+          assert (root/'font_metrics_overlays.rs').is_file()
+          match=re.search(r'(?m)^static FONT_0_[A-Z0-9_]+\s*:',previous)
+          assert match, 'Missing preserved 13-font metrics'
+          original=previous[match.start():]
+          assert re.search(r'pub static FONT_METRICS:\s*\[FontMetric;\s*13\s*\]',original)
+          renamed=re.sub(r'\bFONT_(\d+_[A-Z0-9_]+)\b',r'KICE_FONT_\1',original)
+          renamed=re.sub(r'\bFONT_METRICS\b','KICE_FONT_METRICS',renamed)
+          assert len(re.findall(r'FontMetric\s*\{\s*name:',renamed))==13
+          original_includes='include!("font_metrics_generated.rs");\ninclude!("font_metrics_overlays.rs");'
+          assert current.count(original_includes)==1, '0.8.6 metric include differs'
+          current=current.replace(original_includes,original_includes+'\ninclude!("font_metrics_kice.rs");',1)
+          old_chain='        GENERATED_FONT_METRICS\n            .iter()\n            .chain(MEASURED_FONT_METRIC_OVERLAYS.iter())'
+          new_chain='        KICE_FONT_METRICS\n            .iter()\n            .chain(GENERATED_FONT_METRICS.iter())\n            .chain(MEASURED_FONT_METRIC_OVERLAYS.iter())'
+          assert current.count(old_chain)==1, '0.8.6 metric table differs'
+          current=current.replace(old_chain,new_chain,1)
+          old_alias='    let (alias_resolved_name, alias_rule_id) = resolve_projected_metric_alias(name);'
+          new_alias='    let (alias_resolved_name, alias_rule_id) = if KICE_FONT_METRICS.iter().any(|m| m.name == name) {\n        (name, None)\n    } else {\n        resolve_projected_metric_alias(name)\n    };'
+          assert current.count(old_alias)==1, '0.8.6 metric alias differs'
+          current=current.replace(old_alias,new_alias,1)
+          (root/'font_metrics_kice.rs').write_text('// KICE derived WIDTH METRICS, no font files.\n'+renamed,encoding='utf-8')
+          (root/'font_metrics_data.rs').write_text(current,encoding='utf-8')
+          print('Ported 13 KICE metric faces; retained v0.8.6 generated and overlay metric sets.')
+          PY
+          git -C /tmp/rhwp086 diff --check
+          git -C /tmp/rhwp086 diff -- src/renderer/font_metrics_data.rs > /tmp/kice-font-metric-port.diff
+
+      - name: Compile rhwp binary
+        shell: bash
+        env:
+          RHWP_FONT_PATH: ${{ github.workspace }}/output_ttf
+          CARGO_INCREMENTAL: '0'
+        run: |
+          set -euo pipefail
+          test "$(find output_ttf -maxdepth 1 -type f -name '*.ttf' | wc -l)" -eq 13
+          cd /tmp/rhwp086
+          cargo build --locked --bin rhwp
+          ./target/debug/rhwp --version
+
+      - name: Validate public exam sample layout and PDF output
+        shell: bash
+        env:
+          RHWP_FONT_PATH: ${{ github.workspace }}/output_ttf
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/kice-check
+          curl -fL --retry 3 -o /tmp/kice-check/public_exam_social_p1.hwp https://raw.githubusercontent.com/edwardkim/rhwp/v0.8.6/samples/exam_social-p1.hwp
+          /tmp/rhwp086/target/debug/rhwp info /tmp/kice-check/public_exam_social_p1.hwp > /tmp/kice-check/info.txt
+          /tmp/rhwp086/target/debug/rhwp dump-pages /tmp/kice-check/public_exam_social_p1.hwp -p 0 > /tmp/kice-check/layout.txt
+          /tmp/rhwp086/target/debug/rhwp export-pdf /tmp/kice-check/public_exam_social_p1.hwp -o /tmp/kice-check/public_exam_social_p1.pdf
+          test -s /tmp/kice-check/public_exam_social_p1.pdf
+          echo "PASS: public exam sample parsed, layout inspected, PDF exported." | tee /tmp/kice-check/result.txt
+
+      - name: Save logs and binary without distributing TTF or HFT files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kice-rhwp086-build-validation
+          path: |
+            /tmp/kice-check/info.txt
+            /tmp/kice-check/layout.txt
+            /tmp/kice-check/result.txt
+            /tmp/kice-check/public_exam_social_p1.pdf
+            /tmp/kice-font-metric-port.diff
+            /tmp/rhwp086/target/debug/rhwp
+          if-no-files-found: warn
+          retention-days: 7
