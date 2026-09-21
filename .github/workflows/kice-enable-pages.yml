@@ -1,0 +1,33 @@
+name: Enable GitHub Pages for KICE rhwp Studio
+
+on:
+  push:
+    branches:
+      - jh/kice-rhwp086-actions-20260920
+    paths:
+      - '.github/workflows/kice-enable-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+
+jobs:
+  initialize-pages:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Enable Pages workflow publishing if not initialized
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GH_REPO}/pages" >/tmp/pages-state.json 2>/tmp/pages-get-error; then
+            cat /tmp/pages-state.json
+            echo "GitHub Pages site already exists."
+          else
+            echo "Attempting to initialize GitHub Pages for GitHub Actions deployment."
+            gh api --method POST "repos/${GH_REPO}/pages" -f build_type=workflow
+          fi
