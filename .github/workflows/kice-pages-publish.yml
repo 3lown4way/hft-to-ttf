@@ -1,0 +1,52 @@
+name: Publish KICE rhwp Studio to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/kice-pages-publish.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  pages: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Retrieve the previously built custom KICE web editor
+        uses: actions/download-artifact@v4
+        with:
+          name: github-pages
+          run-id: 35558657198
+          repository: 3lown4way/hft-to-ttf
+          github-token: ${{ github.token }}
+          path: /tmp/previous-pages-artifact
+
+      - name: Reconstruct the prebuilt site from the Pages artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la /tmp/previous-pages-artifact
+          mkdir -p /tmp/kice-site
+          tar -xf /tmp/previous-pages-artifact/artifact.tar -C /tmp/kice-site
+          test -s /tmp/kice-site/index.html
+          test -s /tmp/kice-site/rhwp_bg.wasm
+          test -s /tmp/kice-site/rhwp.js
+          grep -q '/hft-to-ttf/' /tmp/kice-site/index.html
+          echo "KICE custom rhwp build restored without recompilation"
+
+      - name: Upload Pages site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: /tmp/kice-site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
