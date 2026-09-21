@@ -96,7 +96,7 @@ jobs:
           swtext=swtext.replace('assets/'+oldname,'assets/'+newname,1)
           import hashlib
           newhash=hashlib.md5(index.read_bytes()).hexdigest()
-          old_index_rev=r'(url:"index\\.html",revision:")[a-f0-9]{32}(")'
+          old_index_rev=r'(url:"index[.]html",revision:")[a-f0-9]{32}(")'
           swtext,num=re.subn(old_index_rev,lambda m:m.group(1)+newhash+m.group(2),swtext)
           assert num==1,'Expected a single HTML precache revision'
           sw.write_text(swtext,encoding='utf8')
