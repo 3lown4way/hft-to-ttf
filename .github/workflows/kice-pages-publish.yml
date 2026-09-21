@@ -42,6 +42,47 @@ jobs:
           grep -q '/hft-to-ttf/' /tmp/kice-site/index.html
           echo "KICE custom rhwp build restored without recompilation"
 
+      - name: Add exact KICE HWPX font family aliases to the prebuilt editor
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          files=list(Path('/tmp/kice-site/assets').glob('index-*.js'))
+          assert len(files)==1, files
+          js=files[0]
+          source=js.read_text(encoding='utf8')
+          # The previous build registered only filename stems such as
+          # "신명중명조"; HWPX actually requests "신명 중명조".
+          mappings=[
+              ('신명 궁서','신명궁서'),
+              ('신명 견명조','신명견명조'),
+              ('신명 디나루','신명디나루'),
+              ('신명 신그래픽','신명신그래픽'),
+              ('신명 중고딕','신명중고딕'),
+              ('신명 중고딕 - 혼합','신명중고딕-혼합'),
+              ('신명 중명조','신명중명조'),
+              ('신명 중명조 - 한양문자','신명중명조-한양문자'),
+              ('신명 중명조 - 한양영문','신명중명조-한양영문'),
+              ('신명 태고딕','신명태고딕'),
+              ('신명 신명조','신명중명조'),
+              ('한양신명조','신명중명조'),
+          ]
+          aliases=[]
+          for alias,stem in mappings:
+              pat=r'\{name:`'+re.escape(stem)+r'`,file:`[^`]+`,format:`truetype`,ruleId:`JH-KICE-FONT-\d+`\}'
+              m=re.search(pat,source)
+              assert m, 'Missing KICE face '+stem
+              aliases.append(m.group(0).replace('name:`'+stem+'`','name:`'+alias+'`',1))
+          marker='var mn=[{name:`#태고딕`'
+          assert source.count(marker)==1, 'KICE font registry changed'
+          source=source.replace(marker,'var mn=['+','.join(aliases)+',{name:`#태고딕`',1)
+          assert all('name:`'+name+'`' in source for name,_ in mappings)
+          js.write_text(source,encoding='utf8')
+          print('PASS: '+str(len(aliases))+' exact HWPX font aliases added; no font file distributed.')
+          PY
+
       - name: Upload Pages site
         uses: actions/upload-pages-artifact@v4
         with:
