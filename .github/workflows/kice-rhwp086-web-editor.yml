@@ -1,0 +1,180 @@
+name: KICE rhwp 0.8.6 web editor (isolated build)
+
+on:
+  push:
+    branches:
+      - jh/kice-rhwp086-actions-20260920
+    paths:
+      - '.github/workflows/kice-rhwp086-web-editor.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-kice-studio:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 115
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - name: Check out user's isolated KICE sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.93.1 and WASM target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.93.1'
+          targets: wasm32-unknown-unknown
+
+      - name: Fetch upstream rhwp Studio v0.8.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --depth 1 --single-branch --branch v0.8.6 https://github.com/edwardkim/rhwp.git /tmp/rhwp086
+          grep -m1 '^version = "0.8.6"' /tmp/rhwp086/Cargo.toml
+          test -f /tmp/rhwp086/rhwp-studio/package-lock.json
+          test -f /tmp/rhwp086/src/renderer/font_metrics_data.rs
+
+      - name: Overlay the preserved 13 KICE width metric faces on Studio's WASM source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root=Path('/tmp/rhwp086/src/renderer')
+          previous=Path('rhwp/custom/src/renderer/font_metrics_data.rs').read_text(encoding='utf-8')
+          current=(root/'font_metrics_data.rs').read_text(encoding='utf-8')
+          assert (root/'font_metrics_generated.rs').is_file()
+          assert (root/'font_metrics_overlays.rs').is_file()
+          match=re.search(r'(?m)^static FONT_0_[A-Z0-9_]+\s*:',previous)
+          assert match, 'preserved KICE metrics were not found'
+          original=previous[match.start():]
+          assert re.search(r'pub static FONT_METRICS:\s*\[FontMetric;\s*13\s*\]',original)
+          renamed=re.sub(r'\bFONT_(\d+_[A-Z0-9_]+)\b',r'KICE_FONT_\1',original)
+          renamed=re.sub(r'\bFONT_METRICS\b','KICE_FONT_METRICS',renamed)
+          assert len(re.findall(r'FontMetric\s*\{\s*name:',renamed))==13
+          includes='include!("font_metrics_generated.rs");\ninclude!("font_metrics_overlays.rs");'
+          assert current.count(includes)==1
+          current=current.replace(includes,includes+'\ninclude!("font_metrics_kice.rs");',1)
+          old_chain='        GENERATED_FONT_METRICS\n            .iter()\n            .chain(MEASURED_FONT_METRIC_OVERLAYS.iter())'
+          assert current.count(old_chain)==1
+          current=current.replace(old_chain,'        KICE_FONT_METRICS\n            .iter()\n            .chain(GENERATED_FONT_METRICS.iter())\n            .chain(MEASURED_FONT_METRIC_OVERLAYS.iter())',1)
+          old_alias='    let (alias_resolved_name, alias_rule_id) = resolve_projected_metric_alias(name);'
+          assert current.count(old_alias)==1
+          current=current.replace(old_alias,'    let (alias_resolved_name, alias_rule_id) = if KICE_FONT_METRICS.iter().any(|m| m.name == name) {\n        (name, None)\n    } else {\n        resolve_projected_metric_alias(name)\n    };',1)
+          (root/'font_metrics_kice.rs').write_text('// KICE width metrics only; no font files.\n'+renamed, encoding='utf-8')
+          (root/'font_metrics_data.rs').write_text(current, encoding='utf-8')
+          print('KICE metrics port: 13 faces; upstream metric sets retained.')
+          PY
+
+      - name: Install pinned wasm-pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=0.15.0
+          f="wasm-pack-v${v}-x86_64-unknown-linux-musl"
+          curl -fsSL --retry 4 "https://github.com/rustwasm/wasm-pack/releases/download/v${v}/${f}.tar.gz" -o /tmp/wasm-pack.tgz
+          tar -xzf /tmp/wasm-pack.tgz -C /tmp
+          install "/tmp/${f}/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
+          wasm-pack --version
+
+      - name: Compile browser WASM with custom KICE metrics
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/rhwp086
+          wasm-pack build --release --target web --out-dir pkg
+          test -s pkg/rhwp_bg.wasm
+          test -s pkg/rhwp.js
+
+      - name: Install Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build browser editor Studio
+        shell: bash
+        env:
+          RHWP_WITHOUT_HWPCTRL: '1'
+          RHWP_DISABLE_EXTERNAL_WEBFONTS: '1'
+        run: |
+          set -euo pipefail
+          cd /tmp/rhwp086
+          npm ci --prefix rhwp-studio --no-audit --no-fund
+          cp pkg/rhwp_bg.wasm pkg/rhwp.js rhwp-studio/public/
+          cp assets/logo/favicon.ico rhwp-studio/public/favicon.ico
+          cd rhwp-studio
+          npm run build -- --base=/rhwp/
+          test -s dist/index.html
+          test -s dist/rhwp_bg.wasm
+          test -s dist/rhwp.js
+          test -n "$(find dist/assets -maxdepth 1 -type f -name '*.js' -print -quit)"
+          echo 'Studio bundle and KICE WASM exist.'
+
+      - name: Create local browser package without distributing font files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/kice-web-editor-package/rhwp
+          cp -a /tmp/rhwp086/rhwp-studio/dist/. /tmp/kice-web-editor-package/rhwp/
+          find /tmp/kice-web-editor-package -type f \( -iname '*.ttf' -o -iname '*.otf' -o -iname '*.woff' -o -iname '*.woff2' -o -iname '*.ttc' \) -delete
+          cat > /tmp/kice-web-editor-package/start_server.py <<'PY'
+          import http.server
+          import os
+          from pathlib import Path
+          import socketserver
+          import webbrowser
+
+          os.chdir(Path(__file__).resolve().parent)
+          class Server(socketserver.ThreadingTCPServer):
+              allow_reuse_address = True
+
+          with Server(("127.0.0.1", 8765), http.server.SimpleHTTPRequestHandler) as server:
+              url = "http://127.0.0.1:8765/rhwp/"
+              print("Open the editor:", url, flush=True)
+              try:
+                  webbrowser.open(url)
+              except Exception:
+                  pass
+              server.serve_forever()
+          PY
+          cat > /tmp/kice-web-editor-package/README.txt <<'TXT'
+          KICE rhwp Studio Web Editor, based on upstream rhwp v0.8.6.
+          The browser WASM contains the user's 13 custom KICE font width metrics.
+          No TTF/OTF/WOFF/WOFF2 font files are included in this package.
+          In a computer with Python 3 installed, extract this ZIP, run:
+              python3 start_server.py
+          Then open http://127.0.0.1:8765/rhwp/
+          Windows: use py start_server.py if python3 is not a command.
+          Do NOT open index.html directly with file://; WASM needs HTTP.
+          In Studio, load your own legally held local KICE fonts using its local-font
+          feature to display actual glyph shapes; width metrics alone do not supply
+          the fonts or guarantee perfect Hancom-compatible page layout.
+          This is a custom 0.8.6 WEB build, not the old native 0.8.4 CLI build.
+          TXT
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('/tmp/kice-web-editor-package')
+          fonts=[p for p in root.rglob('*') if p.suffix.lower() in ('.ttf','.otf','.woff','.woff2','.ttc')]
+          assert not fonts, fonts
+          assert (root/'rhwp/index.html').is_file()
+          assert (root/'rhwp/rhwp_bg.wasm').stat().st_size > 1024*1024
+          print('Bundle smoke-test PASS: index + WASM present, no font files.')
+          PY
+          cd /tmp
+          zip -qr /tmp/kice-rhwp086-web-editor.zip kice-web-editor-package
+          sha256sum /tmp/kice-rhwp086-web-editor.zip > /tmp/kice-web-editor-sha256.txt
+
+      - name: Upload custom web editor package
+        uses: actions/upload-artifact@v4
+        with:
+          name: kice-rhwp086-web-editor-no-font-files
+          path: |
+            /tmp/kice-rhwp086-web-editor.zip
+            /tmp/kice-web-editor-sha256.txt
+          if-no-files-found: error
+          retention-days: 7
