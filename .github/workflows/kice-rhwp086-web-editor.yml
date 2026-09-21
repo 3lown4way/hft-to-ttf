@@ -115,7 +115,7 @@ jobs:
           for face in local_faces:
               name=face.stem
               url=base+quote(face.name,safe='')
-              entries.append({'name':name,'file':url,'format':'truetype'})
+              entries.append({'name':name,'file':url,'format':'truetype','ruleId':'JH-KICE-FONT-'+str(len(entries)+1).zfill(2)})
           # Document font names also occur as HY-style aliases, and each alias
           # must point to the font the owner already stores in the repository.
           byname={e['name']:e for e in entries}
