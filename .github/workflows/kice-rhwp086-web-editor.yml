@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 jobs:
   build-kice-studio:
@@ -230,3 +232,50 @@ jobs:
             /tmp/kice-web-editor-sha256.txt
           if-no-files-found: error
           retention-days: 7
+
+      - name: Rebuild editor for repository GitHub Pages path
+        shell: bash
+        env:
+          RHWP_WITHOUT_HWPCTRL: '1'
+          RHWP_DISABLE_EXTERNAL_WEBFONTS: '0'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          f=Path('/tmp/rhwp086/rhwp-studio/vite.config.ts')
+          content=f.read_text(encoding='utf-8')
+          assert content.count("'/rhwp/'") >= 2
+          content=content.replace("'/rhwp/'","'/hft-to-ttf/'")
+          f.write_text(content,encoding='utf-8')
+          PY
+          cd /tmp/rhwp086/rhwp-studio
+          npm run build -- --base=/hft-to-ttf/
+          test -s dist/index.html
+          test -s dist/rhwp_bg.wasm
+          test -s dist/rhwp.js
+          grep -q '/hft-to-ttf/' dist/index.html
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('/tmp/rhwp086/rhwp-studio/dist')
+          fonts=[p for p in root.rglob('*') if p.suffix.lower() in ('.ttf','.otf','.woff','.woff2','.ttc')]
+          for p in fonts: p.unlink()
+          assert not [p for p in root.rglob('*') if p.suffix.lower() in ('.ttf','.otf','.woff','.woff2','.ttc')]
+          print('Pages bundle ready at /hft-to-ttf/; no font files bundled')
+          PY
+
+      - name: Upload GitHub Pages site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: /tmp/rhwp086/rhwp-studio/dist
+
+  deploy-github-pages:
+    name: Publish KICE rhwp Studio to GitHub Pages
+    needs: build-kice-studio
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy public web editor
+        id: deploy
+        uses: actions/deploy-pages@v4
