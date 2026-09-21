@@ -1,4 +1,4 @@
-name: KICE rhwp 0.8.6 web editor (isolated build)
+name: KICE rhwp 0.8.6 web editor (auto remote fonts)
 
 on:
   push:
@@ -96,11 +96,63 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Wire the 13 original KICE faces from owner's existing GitHub font URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          from urllib.parse import quote
+          import json
+
+          root=Path('/tmp/rhwp086/rhwp-studio')
+          source= root/'src/core/font-loader.ts'
+          text=source.read_text(encoding='utf-8')
+          local_faces=sorted(Path('output_ttf').glob('*.ttf'))
+          assert len(local_faces)==13, 'Expected precisely 13 existing KICE font sources'
+          base='https://raw.githubusercontent.com/3lown4way/hft-to-ttf/jh/kice-rhwp086-actions-20260920/output_ttf/'
+          entries=[]
+          for face in local_faces:
+              name=face.stem
+              url=base+quote(face.name,safe='')
+              entries.append({'name':name,'file':url,'format':'truetype'})
+          # Document font names also occur as HY-style aliases, and each alias
+          # must point to the font the owner already stores in the repository.
+          byname={e['name']:e for e in entries}
+          for alias, source_name in [
+              ('HY중고딕','한양중고딕'), ('HY견명조','한양견명조'),
+              ('HY신명조','신명중명조'), ('신명조','신명중명조'),
+              ('HY태고딕','신명태고딕'), ('HY궁서','신명궁서'),
+          ]:
+              if source_name in byname:
+                  entries.append({**byname[source_name], 'name': alias})
+          marker='const FONT_LIST: readonly FontEntry[] = FONT_RULE_WEBFONT_ENTRIES;'
+          assert text.count(marker)==1, 'Upstream font loader has changed'
+          ts='const KICE_FONT_LIST: readonly FontEntry[] = '+json.dumps(entries,ensure_ascii=False,indent=2)+';'
+          replacement=(ts+'\n'+
+              'const KICE_NAMES = new Set(KICE_FONT_LIST.map(entry => entry.name.normalize("NFC").toLocaleLowerCase("en-US")));\n'+
+              'const FONT_LIST: readonly FontEntry[] = [\n'+
+              '  ...KICE_FONT_LIST,\n'+
+              '  ...FONT_RULE_WEBFONT_ENTRIES.filter(entry => !KICE_NAMES.has(entry.name.normalize("NFC").toLocaleLowerCase("en-US"))),\n'+
+              '];')
+          text=text.replace(marker,replacement,1)
+          critical="const CRITICAL_FONTS = new Set(['함초롬바탕', '함초롬돋움']);"
+          assert text.count(critical)==1
+          text=text.replace(critical,"const CRITICAL_FONTS = new Set(['함초롬바탕', '함초롬돋움', '신명중명조', '한양중고딕']);",1)
+          source.write_text(text,encoding='utf-8')
+          (root/'public/kice-font-source.json').write_text(json.dumps({
+            'kind':'remote-font-source-manifest','count':13,
+            'note':'Font bytes are not bundled. Loaded automatically from the owner-provided public GitHub repository when needed.',
+            'faces':[{'name':f.stem,'url':base+quote(f.name,safe='')} for f in local_faces],
+          },ensure_ascii=False,indent=2),encoding='utf-8')
+          print('Connected 13 auto-loaded KICE fonts and HY aliases; no font files copied.')
+          PY
+
       - name: Build browser editor Studio
         shell: bash
         env:
           RHWP_WITHOUT_HWPCTRL: '1'
-          RHWP_DISABLE_EXTERNAL_WEBFONTS: '1'
+          RHWP_DISABLE_EXTERNAL_WEBFONTS: '0'
         run: |
           set -euo pipefail
           cd /tmp/rhwp086
@@ -145,15 +197,15 @@ jobs:
           cat > /tmp/kice-web-editor-package/README.txt <<'TXT'
           KICE rhwp Studio Web Editor, based on upstream rhwp v0.8.6.
           The browser WASM contains the user's 13 custom KICE font width metrics.
-          No TTF/OTF/WOFF/WOFF2 font files are included in this package.
+          Original KICE font files are NOT bundled; they load automatically from the owner's existing public GitHub repository.
           In a computer with Python 3 installed, extract this ZIP, run:
               python3 start_server.py
           Then open http://127.0.0.1:8765/rhwp/
           Windows: use py start_server.py if python3 is not a command.
           Do NOT open index.html directly with file://; WASM needs HTTP.
-          In Studio, load your own legally held local KICE fonts using its local-font
-          feature to display actual glyph shapes; width metrics alone do not supply
-          the fonts or guarantee perfect Hancom-compatible page layout.
+          This edition automatically requests the owner's original KICE fonts on first use.
+          An internet connection and access to GitHub raw URLs are necessary.
+          This does not guarantee perfect Hancom-compatible page layout.
           This is a custom 0.8.6 WEB build, not the old native 0.8.4 CLI build.
           TXT
           python3 - <<'PY'
@@ -172,7 +224,7 @@ jobs:
       - name: Upload custom web editor package
         uses: actions/upload-artifact@v4
         with:
-          name: kice-rhwp086-web-editor-no-font-files
+          name: kice-rhwp086-web-editor-auto-kice-fonts
           path: |
             /tmp/kice-rhwp086-web-editor.zip
             /tmp/kice-web-editor-sha256.txt
